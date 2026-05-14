@@ -1,94 +1,55 @@
 # Skill: generate-tests
-# Command: /generate <user story or acceptance criteria>
-# Trigger: User sends "/generate As a user I want to log in so that I can access my dashboard"
+
+- Command: `/generate "<user story>" [--lang ts|js] [--base-url <url>]`
+- Trigger: User sends `/generate As a user I want to log in...`
 
 ## Purpose
-Convert a user story, acceptance criteria, or Jira ticket text into structured test scenarios and production-ready Playwright test code.
 
-## Step-by-Step Execution
+Turn a user story (or Jira ticket text, or acceptance criteria) into a Playwright spec covering happy-path, negative, and edge scenarios.
 
-### Step 1 — Parse the Input
-- Extract the user story text
-- Identify: Actor, Action, Goal
-- Check for acceptance criteria (Given/When/Then or bullet points)
-- If no acceptance criteria found → ask: "I have the user story. Do you have acceptance criteria to add? If not, I'll derive scenarios from the story — reply 'proceed' to continue."
+Unlike `/explore`, this skill does **not** drive a browser — it's a single LLM call. The resulting spec is marked `UNVERIFIED` in the file header so the user knows to run it before trusting it.
 
-### Step 2 — Derive Test Scenarios
-Break down into scenarios covering:
+## Implementation
 
-**Happy Path (must have)**
-- Primary success flow exactly as described in the story
+Backed by [`src/cli/generate.ts`](../src/cli/generate.ts) → [`src/agent/generate.ts`](../src/agent/generate.ts).
 
-**Negative Scenarios (must have — minimum 2)**
-- Invalid inputs
-- Missing required fields
-- Unauthorized access attempts
-- Boundary violations
+### Step 1 — Validate input
 
-**Edge Cases (include where applicable)**
-- Empty states
-- Maximum input lengths
-- Special characters
-- Concurrent actions
+- Capture the full story text (everything after `/generate`).
+- Read optional `--lang ts|js` (default `ts`) and `--base-url <url>`.
+- If the story is fewer than ~20 words and has no acceptance criteria, ask one focused clarifying question before proceeding.
 
-Format each scenario as:
-```
-Scenario: [descriptive name]
-Given: [precondition]
-When: [action]
-Then: [expected result]
-Type: [happy/negative/edge]
-Priority: [high/medium/low]
-```
+### Step 2 — Derive scenarios
 
-### Step 3 — Confirm Scenarios with User
-List all derived scenarios and ask:
-"I've identified [N] test scenarios. Does this look right, or should I add/remove anything? Reply 'generate' to proceed with code generation."
+Single LLM call (Sonnet 4.6 by default, override with `QA_CORE_MODEL_TRANSCRIBE`). The model returns the spec body in a `<spec>` block, including at minimum:
 
-### Step 4 — Generate Test Code
-For each confirmed scenario, write Playwright test code:
+- One happy path
+- One negative case (invalid input, missing field, error state, locked account)
+- One edge case (boundary conditions, special characters, empty submission)
+- One a11y test using `@axe-core/playwright`
 
-```typescript
-// tests/[featureName].spec.ts
-import { test, expect } from '@playwright/test';
+Selector preference (in order): `getByRole` → `getByLabel` → `getByTestId` → CSS.
 
-test.describe('[Feature Name] — [User Story ID if provided]', () => {
+### Step 3 — Emit spec
 
-  test.beforeEach(async ({ page }) => {
-    await page.goto('[relevant URL]');
-  });
+The spec is written to `output/<run-id>/<feature>.spec.{ts,js}` with an UNVERIFIED comment header so the user knows it hasn't been executed against a live page.
 
-  // Happy path
-  test('should [expected outcome] when [action]', async ({ page }) => {
-    // arrange
-    // act  
-    // assert
-    await expect(page.[locator]).toBeVisible();
-  });
+### Step 4 — Report
 
-  // Negative scenarios
-  test('should show error when [invalid condition]', async ({ page }) => {
-    // arrange
-    // act
-    // assert
-    await expect(page.[errorLocator]).toContainText('[error message]');
-  });
+Output to the user:
 
-});
-```
+- Feature name derived from the story
+- Number of scenarios written
+- Path to the spec
+- Command to run it: `npx playwright test <path>`
 
-### Step 5 — Report Output
-Tell the user:
-- Total scenarios generated
-- Breakdown by type (happy/negative/edge)
-- Files saved to ./output/
-- Note any assumptions made (e.g., "I assumed the login URL is /login — update in the test file if different")
+## Handling vague stories
 
-## Output Files
-- `./output/scenarios/[featureName]-scenarios.md` (human-readable scenario list)
-- `./output/tests/[featureName].spec.ts` (Playwright test code)
+If the story is unworkable (e.g., "As a user I want a good experience"):
 
-## Handling Vague Stories
-If the story is too vague (e.g., "As a user I want a good experience"):
-- Do not proceed with guessing
-- Ask: "This story is too broad for me to generate accurate tests. Can you give me one specific feature or acceptance criterion to start with?"
+- Do not guess.
+- Ask: "This story is too broad. Can you give me one specific acceptance criterion or feature to start with?"
+
+## Output files
+
+- `output/<run-id>/<feature>.spec.{ts,js}` — the generated Playwright spec

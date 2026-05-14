@@ -1,0 +1,57 @@
+{
+  "agent": {
+    "id": "qa-core",
+    "name": "QA-Core",
+    "emoji": "🧪",
+    "soulFile": "./agent/SOUL.md",
+    "identityFile": "./agent/IDENTITY.md",
+    "toolsFile": "./agent/TOOLS.md",
+    "memoryFile": "./agent/MEMORY.md",
+    "skillsDir": "./skills"
+  },
+  "channels": {
+    "web": {
+      "enabled": true,
+      "gateway": "ws://127.0.0.1:18789"
+    },
+    "telegram": {
+      "enabled": false,
+      "tokenFile": "~/.openclaw/secrets/telegram-bot-token",
+      "scope": "dms",
+      "streamingPreview": true
+    }
+  },
+  "runner": {
+    "type": "websocket-bridge",
+    "endpoint": "ws://127.0.0.1:18789",
+    "startCommand": "npm run gateway",
+    "description": "OpenClaw routes commands to this gateway; the gateway invokes the TypeScript runtime which calls Claude directly via the Anthropic SDK."
+  },
+  "commands": [
+    {
+      "name": "explore",
+      "skill": "explore-url",
+      "description": "Drive a real browser, transcribe a verified Playwright spec",
+      "usage": "/explore <url>"
+    },
+    {
+      "name": "generate",
+      "skill": "generate-tests",
+      "description": "Convert a user story into Playwright test code (unverified)",
+      "usage": "/generate <user story>"
+    },
+    {
+      "name": "heal",
+      "skill": "heal-spec",
+      "description": "Re-resolve broken selectors in a generated spec",
+      "usage": "/heal <spec-path>"
+    }
+  ],
+  "output": {
+    "dir": "./output"
+  },
+  "memory": {
+    "dir": "./.qa-core"
+  },
+  "env": ".env"
+}

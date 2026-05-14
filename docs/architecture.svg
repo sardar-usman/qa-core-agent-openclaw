@@ -1,0 +1,429 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 2000" font-family="-apple-system, 'Inter', 'Geist', system-ui, sans-serif">
+
+<defs>
+  <style>
+    .title    { font-size: 30px; font-weight: 300; fill: #f5f5f7; letter-spacing: -0.02em; }
+    .title em { fill: #b9a6ff; font-style: normal; }
+    .subtitle { font-size: 14px; fill: #9d9da7; }
+    .eyebrow  { font-size: 10.5px; font-weight: 500; fill: #6b6b78; letter-spacing: 0.16em; text-transform: uppercase; }
+    .section  { font-size: 11px; font-weight: 500; fill: #6b6b78; letter-spacing: 0.14em; }
+    .stage-name   { font-size: 18px; font-weight: 500; fill: #f5f5f7; letter-spacing: -0.012em; }
+    .stage-num    { font-size: 16px; font-weight: 600; fill: #b9a6ff; font-family: ui-monospace, 'Geist Mono', monospace; }
+    .stage-desc   { font-size: 13px; fill: #c8c8d0; }
+    .stage-tag    { font-size: 11px; font-family: ui-monospace, 'Geist Mono', monospace; fill: #b9a6ff; font-weight: 500; }
+    .stage-meta   { font-size: 10.5px; fill: #6b6b78; font-family: ui-monospace, 'Geist Mono', monospace; }
+    .input-title  { font-size: 13px; font-weight: 500; fill: #f5f5f7; }
+    .input-desc   { font-size: 11px; fill: #9d9da7; }
+    .input-cmd    { font-size: 10.5px; font-family: ui-monospace, 'Geist Mono', monospace; fill: #b9a6ff; }
+    .card-title   { font-size: 12.5px; font-weight: 500; fill: #f5f5f7; }
+    .card-desc    { font-size: 11px; fill: #9d9da7; }
+    .sidebar-title { font-size: 11px; font-weight: 500; fill: #f5f5f7; letter-spacing: -0.005em; }
+    .sidebar-desc  { font-size: 10.5px; fill: #9d9da7; }
+    .pill         { font-size: 10px; font-weight: 500; font-family: ui-monospace, 'Geist Mono', monospace; }
+    .footer       { font-size: 11px; fill: #6b6b78; }
+    .key-label    { font-size: 9.5px; font-weight: 500; fill: #9d9da7; letter-spacing: 0.06em; text-transform: uppercase; }
+    .key-text     { font-size: 11px; fill: #f5f5f7; }
+  </style>
+
+  <!-- Aurora glow under the title -->
+  <radialGradient id="aurora1" cx="0.5" cy="0" r="0.6">
+    <stop offset="0%" stop-color="#8b6dff" stop-opacity="0.18"/>
+    <stop offset="100%" stop-color="#8b6dff" stop-opacity="0"/>
+  </radialGradient>
+
+  <!-- Arrows -->
+  <marker id="arrow-violet" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto">
+    <path d="M 0 0 L 10 5 L 0 10 z" fill="#8b6dff"/>
+  </marker>
+  <marker id="arrow-line" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+    <path d="M 0 0 L 10 5 L 0 10 z" fill="#5a5a6a"/>
+  </marker>
+  <marker id="arrow-emerald" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+    <path d="M 0 0 L 10 5 L 0 10 z" fill="#5dd5a4"/>
+  </marker>
+  <marker id="arrow-amber" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+    <path d="M 0 0 L 10 5 L 0 10 z" fill="#f4c560"/>
+  </marker>
+</defs>
+
+<!-- Background -->
+<rect width="1400" height="2000" fill="#08080a"/>
+<rect width="1400" height="600" fill="url(#aurora1)"/>
+
+<!-- ============================ HEADER ============================ -->
+<g id="header">
+  <!-- Eyebrow pill -->
+  <rect x="600" y="42" width="200" height="22" rx="11" fill="#131318" stroke="#2a2a36"/>
+  <circle cx="616" cy="53" r="3" fill="#b9a6ff"/>
+  <text x="626" y="57" class="eyebrow">QA-Core · v0.3 · Architecture</text>
+
+  <text x="700" y="108" text-anchor="middle" class="title">
+    Multi-Agent Test Generation Pipeline
+  </text>
+  <text x="700" y="138" text-anchor="middle" class="subtitle">
+    From a URL or user story to a verified Playwright spec. Planner, Explorer, Critic, Healer, Transcriber
+  </text>
+</g>
+
+<!-- ============================ INPUTS ============================ -->
+<g id="inputs" transform="translate(0, 200)">
+  <text x="80" y="0" class="section">INPUTS</text>
+  <line x1="170" y1="-5" x2="1320" y2="-5" stroke="#2a2a36" stroke-width="1"/>
+
+  <!-- /explore -->
+  <g transform="translate(110, 30)">
+    <rect width="260" height="120" rx="14" fill="#131318" stroke="#2a2a36"/>
+    <rect x="14" y="14" width="80" height="22" rx="6" fill="#1a1a22" stroke="#2a2a36"/>
+    <text x="54" y="29" text-anchor="middle" class="stage-tag" fill="#7dd3e8">/explore</text>
+    <text x="14" y="62" class="input-title">URL → Spec (verified)</text>
+    <text x="14" y="84" class="input-desc">Drive a real Chromium browser</text>
+    <text x="14" y="100" class="input-desc">through the page; transcribe</text>
+    <text x="14" y="116" class="input-desc">the verified session as a spec.</text>
+  </g>
+
+  <!-- /generate -->
+  <g transform="translate(420, 30)">
+    <rect width="260" height="120" rx="14" fill="#131318" stroke="#2a2a36"/>
+    <rect x="14" y="14" width="90" height="22" rx="6" fill="#1a1a22" stroke="#2a2a36"/>
+    <text x="59" y="29" text-anchor="middle" class="stage-tag" fill="#5dd5a4">/generate</text>
+    <text x="14" y="62" class="input-title">Story → Spec (unverified)</text>
+    <text x="14" y="84" class="input-desc">Single-shot LLM call from a</text>
+    <text x="14" y="100" class="input-desc">user story or Jira ticket text.</text>
+    <text x="14" y="116" class="input-desc">Marked UNVERIFIED.</text>
+  </g>
+
+  <!-- /heal -->
+  <g transform="translate(730, 30)">
+    <rect width="260" height="120" rx="14" fill="#131318" stroke="#2a2a36"/>
+    <rect x="14" y="14" width="60" height="22" rx="6" fill="#1a1a22" stroke="#2a2a36"/>
+    <text x="44" y="29" text-anchor="middle" class="stage-tag" fill="#ef7c8d">/heal</text>
+    <text x="14" y="62" class="input-title">Broken spec → Patched spec</text>
+    <text x="14" y="84" class="input-desc">Re-resolves selectors that</text>
+    <text x="14" y="100" class="input-desc">stopped working against the</text>
+    <text x="14" y="116" class="input-desc">live page. Confidence-scored.</text>
+  </g>
+
+  <!-- /eval -->
+  <g transform="translate(1040, 30)">
+    <rect width="260" height="120" rx="14" fill="#131318" stroke="#2a2a36"/>
+    <rect x="14" y="14" width="60" height="22" rx="6" fill="#1a1a22" stroke="#2a2a36"/>
+    <text x="44" y="29" text-anchor="middle" class="stage-tag" fill="#f4c560">/eval</text>
+    <text x="14" y="62" class="input-title">Benchmark across sites</text>
+    <text x="14" y="84" class="input-desc">Runs /explore against 3 public</text>
+    <text x="14" y="100" class="input-desc">sites; reports pass-rate, flake-</text>
+    <text x="14" y="116" class="input-desc">rate, cost per site.</text>
+  </g>
+</g>
+
+<!-- Arrows from inputs converging into the pipeline -->
+<g stroke="#5a5a6a" fill="none" stroke-width="1.5">
+  <path d="M 240 380 L 240 410 Q 240 425 255 425 L 685 425 Q 700 425 700 440 L 700 460" marker-end="url(#arrow-line)"/>
+  <path d="M 550 380 L 550 430 Q 550 445 565 445 L 685 445 Q 700 445 700 460" />
+  <path d="M 860 380 L 860 420 Q 860 435 845 435 L 715 435 Q 700 435 700 460" />
+</g>
+
+<!-- ============================ MEMORY SIDEBAR (LEFT) ============================ -->
+<g id="memory" transform="translate(40, 480)">
+  <rect width="180" height="220" rx="14" fill="#0d0d10" stroke="#1f2a22" stroke-dasharray="4 4"/>
+  <!-- Icon -->
+  <circle cx="22" cy="26" r="11" fill="#0d2018" stroke="#5dd5a4"/>
+  <ellipse cx="22" cy="23" rx="6" ry="2" stroke="#5dd5a4" fill="none" stroke-width="1.3"/>
+  <path d="M 16 23 L 16 30 Q 22 32 28 30 L 28 23" stroke="#5dd5a4" fill="none" stroke-width="1.3"/>
+  <text x="42" y="22" class="sidebar-title" fill="#5dd5a4">Per-host memory</text>
+  <text x="42" y="36" class="sidebar-desc" fill="#5dd5a4" opacity="0.7" font-family="ui-monospace,monospace" font-size="9.5">.qa-core/sites/</text>
+  <line x1="14" y1="48" x2="166" y2="48" stroke="#2a2a36"/>
+
+  <text x="14" y="68" class="sidebar-desc">Cached fingerprints per origin:</text>
+  <text x="14" y="86" class="sidebar-desc" fill="#c8c8d0">• Observed intents</text>
+  <text x="14" y="103" class="sidebar-desc" fill="#c8c8d0">• Auth strategy hints</text>
+  <text x="14" y="120" class="sidebar-desc" fill="#c8c8d0">• Cascade distribution</text>
+  <text x="14" y="137" class="sidebar-desc" fill="#c8c8d0">• Recent-run summaries</text>
+
+  <line x1="14" y1="152" x2="166" y2="152" stroke="#2a2a36"/>
+  <text x="14" y="172" class="sidebar-desc">Loaded as a <tspan fill="#b9a6ff">cached</tspan></text>
+  <text x="14" y="187" class="sidebar-desc">system block per run.</text>
+  <text x="14" y="206" class="sidebar-desc">Refreshed after every</text>
+  <text x="14" y="221" class="sidebar-desc">successful exploration.</text>
+</g>
+
+<!-- Memory feeds into Planner + Explorer (dashed arrows) -->
+<g fill="none" stroke="#5dd5a4" stroke-width="1.2" stroke-dasharray="4 4" opacity="0.7">
+  <path d="M 220 540 Q 280 540 320 510" marker-end="url(#arrow-emerald)"/>
+  <path d="M 220 660 Q 280 660 320 720" marker-end="url(#arrow-emerald)"/>
+</g>
+
+<!-- ============================ COST / CACHE SIDEBAR (RIGHT) ============================ -->
+<g id="cost" transform="translate(1180, 480)">
+  <rect width="180" height="220" rx="14" fill="#0d0d10" stroke="#2a2235" stroke-dasharray="4 4"/>
+  <!-- Icon -->
+  <circle cx="22" cy="26" r="11" fill="#15102a" stroke="#b9a6ff"/>
+  <text x="22" y="31" text-anchor="middle" fill="#b9a6ff" font-size="13" font-weight="600">$</text>
+  <text x="42" y="22" class="sidebar-title" fill="#b9a6ff">Budget &amp; caching</text>
+  <text x="42" y="36" class="sidebar-desc" fill="#b9a6ff" opacity="0.7" font-family="ui-monospace,monospace" font-size="9.5">3 cached blocks</text>
+  <line x1="14" y1="48" x2="166" y2="48" stroke="#2a2a36"/>
+
+  <text x="14" y="68" class="sidebar-desc">Hard ceiling per run:</text>
+  <text x="14" y="86" class="sidebar-desc" fill="#c8c8d0" font-family="ui-monospace,monospace" font-size="10.5">QA_CORE_MAX_USD=2.00</text>
+
+  <line x1="14" y1="100" x2="166" y2="100" stroke="#2a2a36"/>
+  <text x="14" y="120" class="sidebar-desc">Cached system blocks:</text>
+  <text x="14" y="138" class="sidebar-desc" fill="#c8c8d0">1. Frozen rules</text>
+  <text x="14" y="155" class="sidebar-desc" fill="#c8c8d0">2. Site memory</text>
+  <text x="14" y="172" class="sidebar-desc" fill="#c8c8d0">3. Planner output</text>
+
+  <line x1="14" y1="186" x2="166" y2="186" stroke="#2a2a36"/>
+  <text x="14" y="206" class="sidebar-desc" fill="#c8c8d0">~90% cheaper on</text>
+  <text x="14" y="221" class="sidebar-desc" fill="#c8c8d0">repeat runs per host.</text>
+</g>
+
+<!-- ============================ PIPELINE LABEL ============================ -->
+<text x="700" y="440" text-anchor="middle" class="section">PIPELINE. PLANNER → EXPLORER → CRITIC → TRANSCRIBER</text>
+
+<!-- ============================ STAGE 1: PLANNER ============================ -->
+<g id="stage-1" transform="translate(260, 470)">
+  <rect width="880" height="120" rx="16" fill="#131318" stroke="#2a2a36"/>
+  <!-- Number badge -->
+  <rect x="20" y="20" width="48" height="48" rx="14" fill="#15102a" stroke="rgba(185,166,255,0.3)"/>
+  <text x="44" y="51" text-anchor="middle" class="stage-num">1</text>
+
+  <text x="88" y="38" class="stage-name">Planner</text>
+  <rect x="180" y="22" width="100" height="22" rx="11" fill="#15102a" stroke="rgba(185,166,255,0.25)"/>
+  <text x="230" y="37" text-anchor="middle" class="stage-tag">Haiku 4.5</text>
+
+  <text x="88" y="62" class="stage-desc">Takes one DOM snapshot of the target URL → emits a numbered scenario list.</text>
+  <text x="88" y="82" class="stage-desc">Categories: <tspan fill="#5dd5a4">happy</tspan> · <tspan fill="#f4c560">negative</tspan> · <tspan fill="#7dd3e8">edge</tspan> · <tspan fill="#b9a6ff">a11y</tspan>. Each scenario gets a one-line rationale.</text>
+
+  <!-- Output -->
+  <text x="88" y="104" class="stage-meta">→ output: PlannedScenario[]</text>
+  <!-- Cost / duration -->
+  <text x="860" y="38" text-anchor="end" class="stage-meta" fill="#9d9da7">~$0.001</text>
+  <text x="860" y="54" text-anchor="end" class="stage-meta" fill="#6b6b78">~3s</text>
+
+  <!-- Arrow down -->
+  <path d="M 440 130 L 440 152" stroke="#8b6dff" stroke-width="2" fill="none" marker-end="url(#arrow-violet)"/>
+</g>
+
+<!-- ============================ STAGE OPT: REVIEW ============================ -->
+<g id="stage-review" transform="translate(260, 620)">
+  <rect width="880" height="92" rx="16" fill="transparent" stroke="#f4c560" stroke-dasharray="6 5" stroke-width="1.5"/>
+  <!-- Optional dot badge -->
+  <circle cx="44" cy="44" r="20" fill="transparent" stroke="#f4c560" stroke-width="1.5" stroke-dasharray="3 3"/>
+  <text x="44" y="49" text-anchor="middle" font-size="15" fill="#f4c560" font-weight="600">●</text>
+
+  <text x="88" y="34" class="stage-name" fill="#f4c560">Review checkpoint <tspan fill="#9d9da7" font-size="13" font-weight="400">. optional, --review flag</tspan></text>
+  <text x="88" y="56" class="stage-desc">Export the scenario list to <tspan font-family="ui-monospace,monospace" fill="#b9a6ff" font-size="12">plan.csv</tspan>. Stakeholders open in Excel / Sheets, set Approve=no to skip rows.</text>
+  <text x="88" y="76" class="stage-desc">Resume the run with <tspan font-family="ui-monospace,monospace" fill="#b9a6ff" font-size="12">npm run explore -- --from-plan plan.csv</tspan>.</text>
+
+  <text x="860" y="34" text-anchor="end" class="stage-meta" fill="#f4c560">human</text>
+  <text x="860" y="50" text-anchor="end" class="stage-meta" fill="#f4c560">in the loop</text>
+
+  <path d="M 440 102 L 440 124" stroke="#8b6dff" stroke-width="2" fill="none" marker-end="url(#arrow-violet)"/>
+</g>
+
+<!-- ============================ STAGE 2: EXPLORER ============================ -->
+<g id="stage-2" transform="translate(260, 760)">
+  <rect width="880" height="170" rx="16" fill="#131318" stroke="#2a2a36"/>
+  <rect x="20" y="20" width="48" height="48" rx="14" fill="#15102a" stroke="rgba(185,166,255,0.3)"/>
+  <text x="44" y="51" text-anchor="middle" class="stage-num">2</text>
+
+  <text x="88" y="38" class="stage-name">Explorer</text>
+  <rect x="190" y="22" width="100" height="22" rx="11" fill="#15102a" stroke="rgba(185,166,255,0.25)"/>
+  <text x="240" y="37" text-anchor="middle" class="stage-tag">Opus 4.7</text>
+
+  <text x="88" y="62" class="stage-desc">Agentic tool-use loop driving Playwright <tspan font-weight="600" fill="#f5f5f7">live</tspan>. Every action verified against the real page</text>
+  <text x="88" y="82" class="stage-desc">before the next is taken. Selectors resolved via cascade and recorded with their level.</text>
+
+  <!-- Tool list -->
+  <g transform="translate(88, 96)">
+    <rect width="60" height="18" rx="4" fill="#1a1a22" stroke="#2a2a36"/>
+    <text x="30" y="13" text-anchor="middle" class="stage-meta" fill="#c8c8d0">navigate</text>
+
+    <rect x="68" width="42" height="18" rx="4" fill="#1a1a22" stroke="#2a2a36"/>
+    <text x="89" y="13" text-anchor="middle" class="stage-meta" fill="#c8c8d0">click</text>
+
+    <rect x="118" width="36" height="18" rx="4" fill="#1a1a22" stroke="#2a2a36"/>
+    <text x="136" y="13" text-anchor="middle" class="stage-meta" fill="#c8c8d0">fill</text>
+
+    <rect x="162" width="44" height="18" rx="4" fill="#1a1a22" stroke="#2a2a36"/>
+    <text x="184" y="13" text-anchor="middle" class="stage-meta" fill="#c8c8d0">press</text>
+
+    <rect x="214" width="60" height="18" rx="4" fill="#1a1a22" stroke="#2a2a36"/>
+    <text x="244" y="13" text-anchor="middle" class="stage-meta" fill="#c8c8d0">get_dom</text>
+
+    <rect x="282" width="50" height="18" rx="4" fill="#1a1a22" stroke="#2a2a36"/>
+    <text x="307" y="13" text-anchor="middle" class="stage-meta" fill="#c8c8d0">assert</text>
+
+    <rect x="340" width="118" height="18" rx="4" fill="#1a1a22" stroke="#2a2a36"/>
+    <text x="399" y="13" text-anchor="middle" class="stage-meta" fill="#c8c8d0">begin/end_scenario</text>
+
+    <rect x="466" width="50" height="18" rx="4" fill="#1a1a22" stroke="#2a2a36"/>
+    <text x="491" y="13" text-anchor="middle" class="stage-meta" fill="#c8c8d0">finish</text>
+  </g>
+
+  <text x="88" y="140" class="stage-meta">→ output: verified trace · cascade stats · scenario lifecycle</text>
+
+  <text x="860" y="38" text-anchor="end" class="stage-meta" fill="#9d9da7">~$0.02 – $0.10</text>
+  <text x="860" y="54" text-anchor="end" class="stage-meta" fill="#6b6b78">~30–90s · 40 steps max</text>
+
+  <!-- Cascade indicator -->
+  <text x="860" y="100" text-anchor="end" class="stage-meta" fill="#6b6b78">Selector cascade:</text>
+  <text x="860" y="116" text-anchor="end" class="stage-meta" fill="#b9a6ff">getByRole</text>
+  <text x="860" y="130" text-anchor="end" class="stage-meta" fill="#9d9da7">→ getByLabel</text>
+  <text x="860" y="144" text-anchor="end" class="stage-meta" fill="#9d9da7">→ getByTestId → CSS</text>
+
+  <path d="M 440 180 L 440 202" stroke="#8b6dff" stroke-width="2" fill="none" marker-end="url(#arrow-violet)"/>
+</g>
+
+<!-- ============================ STAGE 3: CRITIC ============================ -->
+<g id="stage-3" transform="translate(260, 960)">
+  <rect width="880" height="120" rx="16" fill="#131318" stroke="#2a2a36"/>
+  <rect x="20" y="20" width="48" height="48" rx="14" fill="#15102a" stroke="rgba(185,166,255,0.3)"/>
+  <text x="44" y="51" text-anchor="middle" class="stage-num">3</text>
+
+  <text x="88" y="38" class="stage-name">Critic</text>
+  <rect x="166" y="22" width="110" height="22" rx="11" fill="#15102a" stroke="rgba(185,166,255,0.25)"/>
+  <text x="221" y="37" text-anchor="middle" class="stage-tag">Sonnet 4.6</text>
+
+  <text x="88" y="62" class="stage-desc">Reads the verified trace, scores each scenario as <tspan fill="#5dd5a4" font-weight="600">ship</tspan> · <tspan fill="#f4c560" font-weight="600">weak</tspan> · <tspan fill="#ef7c8d" font-weight="600">fix</tspan>, with one-line reasons.</text>
+  <text x="88" y="82" class="stage-desc">Catches loose assertions, redundancy, missing negative cases, fragile selectors.</text>
+
+  <text x="88" y="104" class="stage-meta">→ output: verdicts.json · review summary</text>
+  <text x="860" y="38" text-anchor="end" class="stage-meta" fill="#9d9da7">~$0.005</text>
+  <text x="860" y="54" text-anchor="end" class="stage-meta" fill="#6b6b78">~5s</text>
+
+  <path d="M 440 130 L 440 152" stroke="#8b6dff" stroke-width="2" fill="none" marker-end="url(#arrow-violet)"/>
+</g>
+
+<!-- ============================ STAGE 4: TRANSCRIBER ============================ -->
+<g id="stage-4" transform="translate(260, 1110)">
+  <rect width="880" height="130" rx="16" fill="#131318" stroke="#2a2a36"/>
+  <rect x="20" y="20" width="48" height="48" rx="14" fill="#1a2018" stroke="rgba(93,213,164,0.3)"/>
+  <text x="44" y="51" text-anchor="middle" class="stage-num" fill="#5dd5a4">4</text>
+
+  <text x="88" y="38" class="stage-name">Transcriber</text>
+  <rect x="212" y="22" width="118" height="22" rx="11" fill="#1a2018" stroke="rgba(93,213,164,0.25)"/>
+  <text x="271" y="37" text-anchor="middle" class="stage-tag" fill="#5dd5a4">deterministic</text>
+
+  <text x="88" y="62" class="stage-desc">Verified trace → Playwright spec in <tspan font-weight="500" fill="#f5f5f7">TypeScript or JavaScript</tspan>. No LLM call. pure code generation.</text>
+  <text x="88" y="82" class="stage-desc">Emits selectors at their cascade-resolved level. Auto-injects <tspan font-family="ui-monospace,monospace" font-size="12" fill="#b9a6ff">@axe-core/playwright</tspan> a11y check.</text>
+
+  <text x="88" y="110" class="stage-meta">→ output: output/&lt;run-id&gt;/&lt;name&gt;.spec.{ts,js} + run-report.json</text>
+
+  <text x="860" y="38" text-anchor="end" class="stage-meta" fill="#9d9da7">no LLM</text>
+  <text x="860" y="54" text-anchor="end" class="stage-meta" fill="#6b6b78">&lt;1s</text>
+
+  <path d="M 440 140 L 440 162" stroke="#5dd5a4" stroke-width="2" fill="none" marker-end="url(#arrow-emerald)"/>
+</g>
+
+<!-- ============================ OUTPUT ROW ============================ -->
+<g id="outputs" transform="translate(0, 1280)">
+  <text x="700" y="0" text-anchor="middle" class="section">OUTPUTS</text>
+
+  <g transform="translate(260, 30)">
+    <rect width="270" height="80" rx="12" fill="#131318" stroke="#2a2a36"/>
+    <text x="20" y="28" class="card-title" fill="#5dd5a4">spec.ts / spec.js</text>
+    <text x="20" y="48" class="card-desc">Runnable Playwright spec; every</text>
+    <text x="20" y="64" class="card-desc">action already passed once.</text>
+  </g>
+
+  <g transform="translate(565, 30)">
+    <rect width="270" height="80" rx="12" fill="#131318" stroke="#2a2a36"/>
+    <text x="20" y="28" class="card-title" fill="#b9a6ff">run-report.json</text>
+    <text x="20" y="48" class="card-desc">Scenarios, cost per stage, cascade</text>
+    <text x="20" y="64" class="card-desc">stats, Critic verdicts.</text>
+  </g>
+
+  <g transform="translate(870, 30)">
+    <rect width="270" height="80" rx="12" fill="#131318" stroke="#2a2a36"/>
+    <text x="20" y="28" class="card-title" fill="#f4c560">plan.csv (optional)</text>
+    <text x="20" y="48" class="card-desc">Excel-readable scenario list with</text>
+    <text x="20" y="64" class="card-desc">an Approve column for review mode.</text>
+  </g>
+</g>
+
+<!-- ============================ HEALER (separate, on-demand) ============================ -->
+<g id="healer" transform="translate(260, 1430)">
+  <text x="0" y="0" class="section">ON-DEMAND</text>
+  <line x1="100" y1="-5" x2="880" y2="-5" stroke="#2a2a36"/>
+
+  <g transform="translate(0, 20)">
+    <rect width="880" height="120" rx="16" fill="#131318" stroke="rgba(239,124,141,0.25)"/>
+    <rect x="20" y="20" width="48" height="48" rx="14" fill="#2a1418" stroke="rgba(239,124,141,0.3)"/>
+    <text x="44" y="51" text-anchor="middle" class="stage-num" fill="#ef7c8d">⟳</text>
+
+    <text x="88" y="38" class="stage-name">Healer</text>
+    <rect x="170" y="22" width="170" height="22" rx="11" fill="#2a1418" stroke="rgba(239,124,141,0.25)"/>
+    <text x="255" y="37" text-anchor="middle" class="stage-tag" fill="#ef7c8d">Sonnet 4.6 · on-demand</text>
+
+    <text x="88" y="62" class="stage-desc">When a spec fails on a selector miss, runs the spec, finds failures, opens the URL in a fresh browser,</text>
+    <text x="88" y="82" class="stage-desc">proposes replacements, <tspan font-weight="600" fill="#f5f5f7">verifies each resolves to exactly one element</tspan>, then emits a patched spec.</text>
+
+    <text x="88" y="104" class="stage-meta">→ output: &lt;spec&gt;.healed.{ts,js} with inline audit annotations + confidence scores</text>
+    <text x="860" y="38" text-anchor="end" class="stage-meta" fill="#9d9da7">~$0.005</text>
+    <text x="860" y="54" text-anchor="end" class="stage-meta" fill="#6b6b78">per heal</text>
+  </g>
+</g>
+
+<!-- ============================ INTERFACES ============================ -->
+<g id="interfaces" transform="translate(0, 1640)">
+  <text x="80" y="0" class="section">INTERFACES. FOUR WAYS TO INVOKE</text>
+  <line x1="380" y1="-5" x2="1320" y2="-5" stroke="#2a2a36"/>
+
+  <!-- CLI -->
+  <g transform="translate(70, 30)">
+    <rect width="300" height="160" rx="14" fill="#131318" stroke="#2a2a36"/>
+    <text x="20" y="32" class="card-title">▸ CLI</text>
+    <text x="20" y="52" class="card-desc">For engineers and CI scripts.</text>
+    <line x1="20" y1="66" x2="280" y2="66" stroke="#2a2a36"/>
+    <text x="20" y="88" class="stage-meta" fill="#b9a6ff">npm run explore -- &lt;url&gt;</text>
+    <text x="20" y="108" class="stage-meta" fill="#b9a6ff">npm run generate -- "&lt;story&gt;"</text>
+    <text x="20" y="128" class="stage-meta" fill="#b9a6ff">npm run heal -- &lt;spec&gt;</text>
+    <text x="20" y="148" class="stage-meta" fill="#b9a6ff">npm run eval</text>
+  </g>
+
+  <!-- Web UI -->
+  <g transform="translate(390, 30)">
+    <rect width="300" height="160" rx="14" fill="#131318" stroke="#2a2a36"/>
+    <text x="20" y="32" class="card-title">▸ Web UI + WebSocket gateway</text>
+    <text x="20" y="52" class="card-desc">Chat-style interface for sharing</text>
+    <text x="20" y="68" class="card-desc">demos and onboarding stakeholders.</text>
+    <line x1="20" y1="82" x2="280" y2="82" stroke="#2a2a36"/>
+    <text x="20" y="104" class="stage-meta" fill="#b9a6ff">npm run gateway</text>
+    <text x="20" y="122" class="stage-meta" fill="#9d9da7">→ ws://127.0.0.1:18789</text>
+    <text x="20" y="146" class="stage-meta" fill="#9d9da7">qa-core-ui.html · OpenClaw bridge</text>
+  </g>
+
+  <!-- MCP Server -->
+  <g transform="translate(710, 30)">
+    <rect width="300" height="160" rx="14" fill="#131318" stroke="rgba(185,166,255,0.25)"/>
+    <text x="20" y="32" class="card-title" fill="#b9a6ff">▸ MCP server</text>
+    <text x="20" y="52" class="card-desc">Native integration in Claude Desktop,</text>
+    <text x="20" y="68" class="card-desc">Cursor, Cline, Continue, Zed.</text>
+    <line x1="20" y1="82" x2="280" y2="82" stroke="#2a2a36"/>
+    <text x="20" y="104" class="stage-meta" fill="#b9a6ff">npm run mcp</text>
+    <text x="20" y="124" class="stage-meta" fill="#9d9da7">Tools: qa_explore, qa_generate,</text>
+    <text x="20" y="140" class="stage-meta" fill="#9d9da7">qa_heal · Resources: runs, memory</text>
+  </g>
+
+  <!-- CI -->
+  <g transform="translate(1030, 30)">
+    <rect width="300" height="160" rx="14" fill="#131318" stroke="#2a2a36"/>
+    <text x="20" y="32" class="card-title">▸ GitHub Actions</text>
+    <text x="20" y="52" class="card-desc">Type-check + run committed specs</text>
+    <text x="20" y="68" class="card-desc">on every PR. Manual-trigger eval job.</text>
+    <line x1="20" y1="82" x2="280" y2="82" stroke="#2a2a36"/>
+    <text x="20" y="104" class="stage-meta" fill="#b9a6ff">.github/workflows/qa-core.yml</text>
+    <text x="20" y="124" class="stage-meta" fill="#9d9da7">Uploads Playwright HTML report</text>
+    <text x="20" y="140" class="stage-meta" fill="#9d9da7">as artifact on every run.</text>
+  </g>
+</g>
+
+<!-- ============================ FOOTER ============================ -->
+<g id="footer" transform="translate(0, 1880)">
+  <line x1="80" y1="0" x2="1320" y2="0" stroke="#2a2a36"/>
+  <text x="80" y="30" class="footer">QA-Core v0.3 · Multi-agent Playwright generation on Claude</text>
+  <text x="1320" y="30" text-anchor="end" class="footer">Built by Muhammad Usman · sardarusmanjutt.com</text>
+</g>
+
+</svg>

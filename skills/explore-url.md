@@ -1,91 +1,57 @@
 # Skill: explore-url
-# Command: /explore <url>
-# Trigger: User sends "/explore https://example.com"
+
+- Command: `/explore <url> [--lang ts|js]`
+- Trigger: User sends `/explore https://example.com`
 
 ## Purpose
-Open a URL, map all testable UI elements, and generate a complete Playwright test suite.
 
-## Step-by-Step Execution
+Drive a real browser through the given URL using a Claude tool-use loop, then transcribe the verified session into a Playwright test suite. The generated tests have already passed once — every action in the spec corresponds 1:1 to an action the agent executed live.
 
-### Step 1 — Confirm Input
-- Extract the URL from the command
-- Confirm back to the user: "Exploring [URL] — I'll map the UI and generate Playwright tests. Give me a moment."
+## Implementation
 
-### Step 2 — Open and Explore the Page
-Using Playwright headless browser:
-- Navigate to the URL
-- Wait for page to fully load (networkidle)
-- Take a screenshot for reference
-- Extract all interactive elements:
-  - Input fields (type, placeholder, name, id)
-  - Buttons (text, aria-label, role)
-  - Links (text, href)
-  - Forms (action, method, fields)
-  - Dropdowns / selects
-  - Modals / dialogs (if present)
-  - Navigation items
+This skill is backed by code in [`src/cli/explore.ts`](../src/cli/explore.ts) → [`src/agent/runtime.ts`](../src/agent/runtime.ts).
 
-### Step 3 — Build Element Inventory
-Organize findings into a structured map:
-```
-Page: [URL]
-Title: [page title]
-Elements:
-  - [element type]: [selector] — [description]
-  - ...
-User Flows Identified:
-  - [flow name]: [steps]
-  - ...
-```
+### Step 1 — Validate input
 
-### Step 4 — Identify Test Scenarios
-For each user flow, identify:
-- Happy path scenario
-- At least 2 negative/edge case scenarios
-- Boundary conditions (empty inputs, max length, invalid formats)
+- Extract `<url>` from the command. Must start with `http://` or `https://`.
+- Read optional `--lang ts|js` (default `ts`) and `--name <basename>` flags.
+- Confirm: "Exploring `<url>` — driving a real browser. ~30–90s."
 
-### Step 5 — Generate Page Object Model
-Create a Page Object class:
-```typescript
-// pages/[PageName].page.ts
-import { Page, Locator } from '@playwright/test';
+### Step 2 — Tool-use loop
 
-export class [PageName]Page {
-  readonly page: Page;
-  // locators for each element
-  
-  constructor(page: Page) {
-    this.page = page;
-    // initialize locators
-  }
-  
-  // action methods
-}
-```
+The runtime spawns a Chromium browser (reusing storage state from [`tests/auth.setup.ts`](../tests/auth.setup.ts) if available) and exposes these tools to Claude:
 
-### Step 6 — Generate Test File
-Create a `.spec.ts` file:
-```typescript
-// tests/[pageName].spec.ts
-import { test, expect } from '@playwright/test';
-import { [PageName]Page } from '../pages/[PageName].page';
+- `navigate(url)` — go to a URL
+- `get_dom()` — return a pruned snapshot of interactive elements
+- `click(intent, …)` / `fill(intent, value, …)` / `press(intent, key, …)`
+- `assert(type, …)` — `toBeVisible` / `toHaveText` / `toContainText` / `toHaveURL` / `toHaveCount`
+- `begin_scenario(name, category)` / `end_scenario()`
+- `finish(summary)`
 
-test.describe('[Page/Feature Name]', () => {
-  // happy path tests
-  // negative tests
-  // edge case tests
-});
-```
+Selectors are resolved via cascade: `getByRole` → `getByLabel` → `getByTestId` → CSS. The cascade level that wins is recorded for the transcriber.
 
-### Step 7 — Report Output
-Tell the user:
-- How many elements were found
-- How many test scenarios were generated
-- How many test files were created
-- Where the files are saved (./output/)
-- Any warnings (e.g., "No form found — skipped form validation tests")
+### Step 3 — Enforce budgets
 
-## Output Files
-- `./output/pages/[PageName].page.ts`
-- `./output/tests/[pageName].spec.ts`
-- `./output/element-map.md` (human-readable element inventory)
+- Step ceiling: `QA_CORE_MAX_STEPS` (default 40).
+- Cost ceiling: `QA_CORE_MAX_USD` (default $2.00). Loop aborts if exceeded.
+- Prompt caching is applied to the system prompt — repeat runs reuse the cache (~90% cheaper).
+
+### Step 4 — Transcribe
+
+The verified trace is handed to [`src/agent/transcriber.ts`](../src/agent/transcriber.ts) which emits a Playwright spec in the chosen language. Every spec includes an auto-injected `@axe-core/playwright` accessibility check on the landing page.
+
+### Step 5 — Report
+
+Output to the user:
+
+- Number of scenarios recorded
+- Number of tests in the generated spec
+- Cost (USD) and tokens consumed
+- Cascade distribution (how many selectors hit `role` vs `label` vs `testid` vs `css`)
+- Path to the generated spec
+- Command to run it: `npx playwright test <path>`
+
+## Output files
+
+- `output/<run-id>/<name>.spec.{ts,js}` — the generated Playwright spec
+- `output/<run-id>/run-report.json` — scenarios, cost, cascade stats, timings

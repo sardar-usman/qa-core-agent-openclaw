@@ -1,0 +1,20 @@
+{
+  "_comment": "Copy this into your Claude Desktop config file and replace the absolute paths.",
+  "_macos_path": "~/Library/Application Support/Claude/claude_desktop_config.json",
+  "_windows_path": "%APPDATA%\\Claude\\claude_desktop_config.json",
+  "_linux_path": "~/.config/Claude/claude_desktop_config.json",
+  "mcpServers": {
+    "qa-core": {
+      "command": "npx",
+      "args": [
+        "tsx",
+        "/absolute/path/to/qa-core-agent/src/mcp/server.ts"
+      ],
+      "env": {
+        "ANTHROPIC_API_KEY": "sk-ant-REPLACE_ME",
+        "QA_CORE_PROJECT_ROOT": "/absolute/path/to/qa-core-agent",
+        "QA_CORE_MAX_USD": "2.00"
+      }
+    }
+  }
+}

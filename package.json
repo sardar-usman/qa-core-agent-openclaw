@@ -1,0 +1,38 @@
+{
+  "name": "qa-core-agent",
+  "version": "0.2.0",
+  "private": true,
+  "description": "Autonomous QA agent — generates Playwright test suites from URLs, user stories, and PR diffs using an agentic tool-use loop on Claude.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "explore": "tsx src/cli/explore.ts",
+    "generate": "tsx src/cli/generate.ts",
+    "heal": "tsx src/cli/heal.ts",
+    "eval": "tsx scripts/eval.ts",
+    "gateway": "tsx src/server/gateway.ts",
+    "mcp": "tsx src/mcp/server.ts",
+    "test": "playwright test",
+    "test:ci": "playwright test --reporter=github,html",
+    "typecheck": "tsc --noEmit",
+    "auth:setup": "playwright test --project=setup"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.0",
+    "@axe-core/playwright": "^4.10.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@playwright/test": "^1.48.0",
+    "dotenv": "^16.4.5",
+    "playwright": "^1.48.0",
+    "ws": "^8.20.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
+  }
+}
