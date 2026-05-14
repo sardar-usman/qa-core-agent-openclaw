@@ -80,32 +80,31 @@ flowchart LR
     classDef io fill:#0d0d10,stroke:#5b5b66,color:#9d9da7
     classDef memory fill:#0d0d10,stroke:#5dd5a4,color:#5dd5a4
 
-    URL[URL or Story]:::io
-    P[Planner Haiku 4.5 ~$0.001]:::stage
-    REV[Review checkpoint --review plan.csv]:::optional
-    E[Explorer Opus 4.7 tool-use loop]:::stage
-    C[Critic Sonnet 4.6 ship/weak/fix]:::stage
-    T[Transcriber deterministic + axe-core]:::stage
-    H[Healer Sonnet 4.6 on-demand]:::stage
-    SPEC[.spec.ts or .spec.js]:::io
-    CI[CI / GitHub Actions]:::io
-
-    MEM[Per-host memory .qa-core/sites/]:::memory
+    URL["URL or Story"]:::io
+    P["Planner (Haiku 4.5)"]:::stage
+    REV["Review checkpoint"]:::optional
+    E["Explorer (Opus 4.7) tool-use loop"]:::stage
+    C["Critic (Sonnet 4.6) ship, weak, fix"]:::stage
+    T["Transcriber + axe-core"]:::stage
+    H["Healer (Sonnet 4.6) on-demand"]:::stage
+    SPEC["Spec file (.ts or .js)"]:::io
+    CI["CI and GitHub Actions"]:::io
+    MEM["Per-host memory"]:::memory
 
     URL --> P
-    P -.optional.-> REV
-    REV -.--from-plan.-> E
+    P -.->|optional| REV
+    REV -.->|from plan| E
     P --> E
     E --> C
     C --> T
     T --> SPEC
     SPEC --> CI
-    SPEC -.on failure.-> H
-    H -.patched.-> SPEC
+    SPEC -.->|on failure| H
+    H -.->|patched| SPEC
 
-    MEM -.cached prompt.-> P
-    MEM -.cached prompt.-> E
-    E -.observed intents.-> MEM
+    MEM -.->|cached prompt| P
+    MEM -.->|cached prompt| E
+    E -.->|observed intents| MEM
 ```
 
 ### The selector cascade
