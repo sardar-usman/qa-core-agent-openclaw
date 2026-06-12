@@ -1,32 +1,75 @@
 import type { Page } from '@playwright/test';
 import { expect } from '@playwright/test';
-import { resolve, type CascadeLevel } from './selectors.js';
+import { resolve, type CascadeLevel, escapeRegex } from './selectors.js';
 import type { Assertion, Scenario, SelectorRecord, TraceStep } from './trace.js';
+import { baseLocator } from './replay.js';
 
 /**
- * Tool surface exposed to Claude via tool-use. Each function returns a
- * structured JSON result the model can reason over; failures surface as
- * `{ ok: false, error }` so the agent can recover instead of crashing.
+ * Tool surface exposed to Claude via tool-use.
+ *
+ * Hardening over v1:
+ *   - `navigate` waits for `load` (not just DOMContentLoaded) to give SPAs
+ *     a chance to hydrate before the next get_dom call.
+ *   - `get_dom` reports form state (disabled / required / readonly / value /
+ *     aria-invalid / aria-required) and uses a real visibility check.
+ *   - `begin_scenario` clears cookies + storage so scenarios do not inherit
+ *     state from each other (matches how the transcribed tests will run).
+ *   - `toHaveURL` escapes the user pattern; the agent passes a substring,
+ *     not a regex.
+ *   - Console errors and 4xx/5xx responses are captured per scenario.
  */
 
 export interface ToolContext {
   page: Page;
-  /** Mutated by tool calls. The transcriber consumes this at the end. */
   scenarios: Scenario[];
   current: Scenario | null;
   cascadeStats: Record<CascadeLevel, number>;
   steps: number;
   maxSteps: number;
+  /** Rolling capture for the current scenario; flushed onto it at end_scenario. */
+  consoleErrors: Array<{ kind: 'error' | 'warning'; text: string }>;
+  networkErrors: Array<{ status: number; url: string }>;
+  /** Installed listener disposers so we can detach on page swap. */
+  _detachListeners?: () => void;
 }
 
 export function createContext(page: Page, maxSteps: number): ToolContext {
-  return {
+  const ctx: ToolContext = {
     page,
     scenarios: [],
     current: null,
     cascadeStats: { role: 0, label: 0, testid: 0, css: 0 },
     steps: 0,
     maxSteps,
+    consoleErrors: [],
+    networkErrors: [],
+  };
+  attachDiagnostics(ctx);
+  return ctx;
+}
+
+function attachDiagnostics(ctx: ToolContext): void {
+  const onConsole = (msg: import('@playwright/test').ConsoleMessage) => {
+    const t = msg.type();
+    if (t !== 'error' && t !== 'warning') return;
+    ctx.consoleErrors.push({ kind: t, text: msg.text().slice(0, 240) });
+  };
+  const onPageError = (err: Error) => {
+    ctx.consoleErrors.push({ kind: 'error', text: (err.message ?? String(err)).slice(0, 240) });
+  };
+  const onResponse = (res: import('@playwright/test').Response) => {
+    const status = res.status();
+    if (status >= 400 && status < 600) {
+      ctx.networkErrors.push({ status, url: res.url().slice(0, 240) });
+    }
+  };
+  ctx.page.on('console', onConsole);
+  ctx.page.on('pageerror', onPageError);
+  ctx.page.on('response', onResponse);
+  ctx._detachListeners = () => {
+    ctx.page.off('console', onConsole);
+    ctx.page.off('pageerror', onPageError);
+    ctx.page.off('response', onResponse);
   };
 }
 
@@ -41,15 +84,11 @@ export interface ToolResult {
   error?: string;
 }
 
-/**
- * JSON-schema tool definitions sent to Claude. Keep these tight — every
- * extra field eats tokens and clouds the model's choice.
- */
 export const TOOL_DEFS = [
   {
     name: 'begin_scenario',
     description:
-      'Start a new test scenario. Call this before any actions. Categories: happy (positive path), negative (invalid input / error states), edge (boundary conditions), a11y (accessibility).',
+      'Start a new test scenario. Call this before any actions. Categories: happy (positive path), negative (invalid input / error states), edge (boundary conditions), a11y (accessibility). Cookies and storage are cleared automatically so scenarios start from a clean state.',
     input_schema: {
       type: 'object',
       properties: {
@@ -61,7 +100,7 @@ export const TOOL_DEFS = [
   },
   {
     name: 'navigate',
-    description: 'Navigate the browser to a URL. Must be called at least once before any other action.',
+    description: 'Navigate the browser to a URL. Waits for the page to finish loading (including SPA hydration when possible).',
     input_schema: {
       type: 'object',
       properties: { url: { type: 'string' } },
@@ -117,7 +156,7 @@ export const TOOL_DEFS = [
   },
   {
     name: 'wait',
-    description: 'Wait for a fixed number of milliseconds. Use sparingly; prefer assertions that auto-wait.',
+    description: 'Fixed sleep. Prefer assertions (which auto-wait). Capped at 3000ms.',
     input_schema: {
       type: 'object',
       properties: { ms: { type: 'number' } },
@@ -127,13 +166,13 @@ export const TOOL_DEFS = [
   {
     name: 'get_dom',
     description:
-      'Return a pruned summary of the visible interactive elements on the page (forms, buttons, inputs, links, headings). Use this to decide what to do next.',
+      'Return a pruned summary of interactive elements (headings, inputs, buttons, links). Each interactive element reports accessible name, role, testid, disabled / required / readonly / value when applicable. Use this to decide the next action.',
     input_schema: { type: 'object', properties: {} },
   },
   {
     name: 'assert',
     description:
-      'Record an assertion as part of the current scenario. Use this for the verifiable outcome of the actions you took.',
+      'Record an assertion for the current scenario. Use this for the verifiable outcome of the actions you took. Text passed to toHaveURL is treated as a literal substring.',
     input_schema: {
       type: 'object',
       properties: {
@@ -141,21 +180,21 @@ export const TOOL_DEFS = [
           type: 'string',
           enum: ['toBeVisible', 'toHaveText', 'toContainText', 'toHaveURL', 'toHaveCount'],
         },
-        intent: { type: 'string', description: 'For element assertions: the target element intent.' },
+        intent: { type: 'string' },
         role: { type: 'string' },
         label: { type: 'string' },
         testid: { type: 'string' },
         css: { type: 'string' },
-        text: { type: 'string', description: 'For text assertions.' },
-        pattern: { type: 'string', description: 'For URL assertions (substring or regex source).' },
-        count: { type: 'number', description: 'For count assertions.' },
+        text: { type: 'string' },
+        pattern: { type: 'string', description: 'URL substring (literal, no regex required).' },
+        count: { type: 'number' },
       },
       required: ['type'],
     },
   },
   {
     name: 'end_scenario',
-    description: 'Finish the current scenario. Always call this after the scenario completes.',
+    description: 'Finish the current scenario. The scenario must have at least one assertion.',
     input_schema: { type: 'object', properties: {} },
   },
   {
@@ -177,13 +216,7 @@ function pushStep(ctx: ToolContext, step: TraceStep): void {
 
 async function resolveAndRecord(
   ctx: ToolContext,
-  input: {
-    intent: string;
-    role?: string;
-    label?: string;
-    testid?: string;
-    css?: string;
-  },
+  input: { intent: string; role?: string; label?: string; testid?: string; css?: string },
 ): Promise<{ record: SelectorRecord; loc: import('@playwright/test').Locator }> {
   const resolved = await resolve(ctx.page, input);
   if (!resolved) {
@@ -191,15 +224,21 @@ async function resolveAndRecord(
   }
   ctx.cascadeStats[resolved.level] = (ctx.cascadeStats[resolved.level] ?? 0) + 1;
   return {
-    record: { level: resolved.level, arg: resolved.arg, intent: input.intent },
+    record: { level: resolved.level, arg: resolved.arg, intent: input.intent, ambiguous: resolved.ambiguous || undefined },
     loc: resolved.locator,
   };
 }
 
-/**
- * Dispatch a tool call. The runtime wraps every invocation in try/catch
- * and returns `{ ok: false, error }` for the model to recover from.
- */
+async function isolateState(page: Page): Promise<void> {
+  try { await page.context().clearCookies(); } catch { /* noop */ }
+  try {
+    await page.evaluate(() => {
+      try { localStorage.clear(); } catch { /* cross-origin */ }
+      try { sessionStorage.clear(); } catch { /* cross-origin */ }
+    });
+  } catch { /* about:blank or no origin yet */ }
+}
+
 export async function runTool(ctx: ToolContext, call: ToolInput): Promise<ToolResult> {
   ctx.steps++;
   if (ctx.steps > ctx.maxSteps) {
@@ -212,13 +251,16 @@ export async function runTool(ctx: ToolContext, call: ToolInput): Promise<ToolRe
         const category = String(call.input.category ?? 'happy') as Scenario['category'];
         if (!name) return { ok: false, error: 'Scenario name required.' };
         if (ctx.current) return { ok: false, error: 'A scenario is already in progress.' };
+        await isolateState(ctx.page);
+        ctx.consoleErrors = [];
+        ctx.networkErrors = [];
         ctx.current = { name, category, steps: [] };
         return { ok: true, data: { name, category } };
       }
       case 'navigate': {
         const url = String(call.input.url ?? '');
         if (!/^https?:\/\//.test(url)) return { ok: false, error: 'navigate requires an http(s) URL.' };
-        await ctx.page.goto(url, { waitUntil: 'domcontentloaded' });
+        await ctx.page.goto(url, { waitUntil: 'load' });
         if (ctx.current) pushStep(ctx, { kind: 'navigate', url });
         return { ok: true, data: { url: ctx.page.url() } };
       }
@@ -226,7 +268,7 @@ export async function runTool(ctx: ToolContext, call: ToolInput): Promise<ToolRe
         const { record, loc } = await resolveAndRecord(ctx, call.input as never);
         await loc.click();
         pushStep(ctx, { kind: 'click', target: record });
-        return { ok: true, data: { clicked: record.intent } };
+        return { ok: true, data: { clicked: record.intent, ambiguous: record.ambiguous ?? false } };
       }
       case 'fill': {
         const value = String(call.input.value ?? '');
@@ -243,7 +285,7 @@ export async function runTool(ctx: ToolContext, call: ToolInput): Promise<ToolRe
         return { ok: true, data: { pressed: key, on: record.intent } };
       }
       case 'wait': {
-        const ms = Math.min(Math.max(0, Number(call.input.ms ?? 0)), 5000);
+        const ms = Math.min(Math.max(0, Number(call.input.ms ?? 0)), 3000);
         await ctx.page.waitForTimeout(ms);
         if (ctx.current) pushStep(ctx, { kind: 'wait', ms });
         return { ok: true, data: { waited: ms } };
@@ -253,22 +295,45 @@ export async function runTool(ctx: ToolContext, call: ToolInput): Promise<ToolRe
         return { ok: true, data: summary };
       }
       case 'assert': {
-        const result = await executeAssertion(ctx, call.input as never);
-        return result;
+        return await executeAssertion(ctx, call.input as never);
       }
       case 'end_scenario': {
         if (!ctx.current) return { ok: false, error: 'No scenario to end.' };
         if (!ctx.current.steps.some((s) => s.kind === 'assert')) {
           return { ok: false, error: 'Scenario has no assertions. Add at least one before end_scenario.' };
         }
+        if (ctx.consoleErrors.length) ctx.current.consoleErrors = [...ctx.consoleErrors];
+        if (ctx.networkErrors.length) ctx.current.networkErrors = [...ctx.networkErrors];
         ctx.scenarios.push(ctx.current);
         ctx.current = null;
-        return { ok: true, data: { scenariosSoFar: ctx.scenarios.length } };
+        return {
+          ok: true,
+          data: {
+            scenariosSoFar: ctx.scenarios.length,
+            consoleErrors: ctx.consoleErrors.length,
+            networkErrors: ctx.networkErrors.length,
+          },
+        };
       }
       case 'finish': {
-        if (ctx.current) ctx.scenarios.push(ctx.current);
+        // A scenario in progress when finish() is called is an ABANDONED
+        // scenario: the agent gave up mid-flow (network failure, gave up
+        // after too many retries, etc.). end_scenario already refuses to
+        // close an assertion-less scenario; finish must apply the same rule
+        // or we'd emit empty specs that pass replay vacuously.
+        let dropped = 0;
+        if (ctx.current) {
+          const hasAssert = ctx.current.steps.some((s) => s.kind === 'assert');
+          if (hasAssert) {
+            if (ctx.consoleErrors.length) ctx.current.consoleErrors = [...ctx.consoleErrors];
+            if (ctx.networkErrors.length) ctx.current.networkErrors = [...ctx.networkErrors];
+            ctx.scenarios.push(ctx.current);
+          } else {
+            dropped = 1;
+          }
+        }
         ctx.current = null;
-        return { ok: true, data: { done: true, scenarios: ctx.scenarios.length } };
+        return { ok: true, data: { done: true, scenarios: ctx.scenarios.length, droppedIncomplete: dropped } };
       }
       default:
         return { ok: false, error: `Unknown tool: ${call.name}` };
@@ -295,7 +360,7 @@ async function executeAssertion(
   switch (input.type) {
     case 'toBeVisible': {
       const { record, loc } = await resolveAndRecord(ctx, { ...input, intent: input.intent ?? 'element' });
-      await expect(loc).toBeVisible({ timeout: 5000 });
+      await expect(loc).toBeVisible();
       pushStep(ctx, { kind: 'assert', name: `${record.intent} is visible`, assertion: { type: 'toBeVisible', target: record } });
       return { ok: true };
     }
@@ -314,24 +379,33 @@ async function executeAssertion(
     }
     case 'toHaveURL': {
       if (input.pattern == null) return { ok: false, error: 'toHaveURL needs pattern.' };
-      await expect(ctx.page).toHaveURL(new RegExp(input.pattern));
+      // The model passes a literal substring. Escape before compiling so a
+      // URL like "/auth.app/dashboard" does not turn the dots into "any char".
+      const escaped = escapeRegex(input.pattern);
+      await expect(ctx.page).toHaveURL(new RegExp(escaped));
       if (ctx.current) {
         pushStep(ctx, {
           kind: 'assert',
-          name: `URL matches /${input.pattern}/`,
-          assertion: { type: 'toHaveURL', pattern: input.pattern },
+          name: `URL contains "${input.pattern}"`,
+          assertion: { type: 'toHaveURL', pattern: escaped },
         });
       }
       return { ok: true };
     }
     case 'toHaveCount': {
       if (input.count == null) return { ok: false, error: 'toHaveCount needs count.' };
-      const { record, loc } = await resolveAndRecord(ctx, { ...input, intent: input.intent ?? 'element' });
-      await expect(loc).toHaveCount(input.count);
+      const { record } = await resolveAndRecord(ctx, { ...input, intent: input.intent ?? 'element' });
+      // toHaveCount needs the multi-match locator; .first() would collapse the
+      // count to 1 and any count > 1 assertion would be impossible.
+      const countLoc = baseLocator(ctx.page, record);
+      await expect(countLoc).toHaveCount(input.count);
       pushStep(ctx, {
         kind: 'assert',
         name: `${record.intent} count is ${input.count}`,
-        assertion: { type: 'toHaveCount', target: record, count: input.count },
+        // Strip the ambiguity marker so the transcribed spec also omits .first()
+        // for this specific assertion. baseLocator already does the right thing
+        // in replay.ts when ambiguous=false.
+        assertion: { type: 'toHaveCount', target: { ...record, ambiguous: undefined }, count: input.count },
       });
       return { ok: true };
     }
@@ -339,34 +413,69 @@ async function executeAssertion(
 }
 
 /**
- * Return a pruned, agent-friendly view of the page: title, URL, headings,
- * interactive controls with their accessible names.
- *
- * We deliberately cap output so the agent doesn't burn tokens on huge pages.
+ * Pruned, agent-friendly view of the page. Includes the form-state fields
+ * the agent needs to decide what to do next.
  */
 async function summarizeDom(page: Page): Promise<unknown> {
+  // NOTE: every helper inside page.evaluate() is a `function` declaration, not
+  // a const-assigned arrow. tsx/esbuild injects a `__name(fn, "x")` wrapper
+  // around arrows-assigned-to-consts which references a parent-module helper
+  // that does not exist when the function is serialized into the browser
+  // context. Function declarations are safe.
   return await page.evaluate(() => {
-    const MAX = 60;
-    const pick = (el: Element) => {
-      const r = (el as HTMLElement);
+    const MAX_INTERACTIVE = 80;
+    const MAX_HEADINGS = 16;
+    const MAX_LINKS = 40;
+
+    function isVisible(el: Element): boolean {
+      const e = el as HTMLElement;
+      const cv = (e as unknown as { checkVisibility?: (opts: object) => boolean }).checkVisibility;
+      if (typeof cv === 'function') {
+        try { return cv.call(e, { checkOpacity: true, checkVisibilityCSS: true }); } catch { /* fallthrough */ }
+      }
+      const r = e.getBoundingClientRect();
+      const cs = getComputedStyle(e);
+      return r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none';
+    }
+
+    function trunc(s: string | null | undefined, n: number): string | undefined {
+      if (s == null) return undefined;
+      const str = s.length > n ? s.slice(0, n) : s;
+      return str || undefined;
+    }
+
+    function pick(el: Element): Record<string, unknown> {
+      const r = el as HTMLElement;
+      const input = r as HTMLInputElement;
+      const isInput = /^(input|textarea|select)$/i.test(r.tagName);
+      const isFormControl = isInput || r.tagName === 'BUTTON';
       const label =
         r.getAttribute('aria-label') ||
         r.getAttribute('placeholder') ||
         r.getAttribute('name') ||
         (r.textContent ?? '').trim().slice(0, 80);
+      const nativeDisabled =
+        isFormControl ? (r as unknown as { disabled?: boolean }).disabled === true : false;
       return {
         tag: r.tagName.toLowerCase(),
         role: r.getAttribute('role') || undefined,
         label: label || undefined,
         testid: r.getAttribute('data-testid') || undefined,
-        type: (r as HTMLInputElement).type || undefined,
-        visible: !!(r as HTMLElement).offsetParent,
+        type: isInput ? input.type || undefined : undefined,
+        visible: isVisible(r),
+        disabled: (nativeDisabled || r.getAttribute('aria-disabled') === 'true') || undefined,
+        required: isInput ? (input.required || r.getAttribute('aria-required') === 'true' || undefined) : undefined,
+        readonly: isInput ? (input.readOnly || undefined) : undefined,
+        value: isInput ? trunc(input.value, 80) : undefined,
+        ariaInvalid: r.getAttribute('aria-invalid') === 'true' || undefined,
+        validation: isInput ? trunc(input.validationMessage, 120) : undefined,
       };
-    };
-    const headings = Array.from(document.querySelectorAll('h1, h2, h3')).slice(0, 10).map(pick);
-    const inputs = Array.from(document.querySelectorAll('input, textarea, select')).slice(0, MAX).map(pick);
-    const buttons = Array.from(document.querySelectorAll('button, [role="button"]')).slice(0, MAX).map(pick);
-    const links = Array.from(document.querySelectorAll('a[href]')).slice(0, 30).map(pick);
+    }
+
+    const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4')).slice(0, MAX_HEADINGS).map(pick);
+    const inputs = Array.from(document.querySelectorAll('input, textarea, select')).slice(0, MAX_INTERACTIVE).map(pick);
+    const buttons = Array.from(document.querySelectorAll('button, [role="button"]')).slice(0, MAX_INTERACTIVE).map(pick);
+    const links = Array.from(document.querySelectorAll('a[href]')).slice(0, MAX_LINKS).map(pick);
     return {
       title: document.title,
       url: location.href,

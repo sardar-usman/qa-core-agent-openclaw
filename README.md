@@ -39,15 +39,17 @@ Generated files land under `output/<run-id>/`.
 
 Most "AI test generators" take a single DOM snapshot, hand it to an LLM, and hope the output works. QA-Core does not do that.
 
-It runs a real agent pipeline:
+It runs a real five-stage agent pipeline. Three stages use the LLM. Two don't.
 
 * The **Planner** uses Haiku to read one page snapshot and write a numbered scenario list.
-* The **Explorer** uses Opus and a tool-use loop to drive the browser. It navigates, clicks, fills, and asserts against the live page. Every action is verified before the next one.
+* The **Explorer** uses Opus and a tool-use loop to drive the browser. It navigates, clicks, fills, and asserts against the live page. Every action is verified before the next one. Cookies and storage are cleared between scenarios so tests do not inherit state from each other.
 * The **Critic** uses Sonnet to review the trace and label each scenario as ship, weak, or fix.
-* The **Transcriber** is deterministic. It turns the verified trace into Playwright code.
+* The **Reality-Check Replay** re-executes every recorded scenario in a fresh browser context. Scenarios that fail the second independent run are dropped before any spec is written. Zero LLM cost.
+* The **Stability Iteration** runs each replay-survivor three more times. Scenarios that pass-then-fail are dropped as flaky. Produces a `flake_rate` metric per run. Zero LLM cost.
+* The **Transcriber** is deterministic. It turns the verified trace into Playwright code with a matching `beforeEach` so the emitted spec runs under the same isolation policy.
 * The **Healer** is on-demand. When a real Playwright run fails because the page changed, it re-resolves the broken selectors live.
 
-This means every line in the final spec corresponds to an action that already worked once against your real app.
+This means every line in the final spec corresponds to an action that already passed five independent executions in fresh browser contexts before the file is written: one exploration, one replay, three stability re-runs.
 
 ## How it works
 
@@ -62,20 +64,31 @@ This means every line in the final spec corresponds to an action that already wo
 
 [2] Explorer  (Opus)  ◀─ tool-use loop with prompt caching
     navigate / click / fill / assert / get_dom / finish
+    cookies + storage cleared between scenarios
     every action verified against the live page
 
 [3] Critic    (Sonnet)
     reads the trace, returns ship / weak / fix verdicts
 
+[4] Reality-Check Replay      (zero LLM cost)
+    re-executes each scenario in a fresh browser context
+    drops anything that fails the independent re-run
+
+[5] Stability Iteration       (zero LLM cost)
+    runs each replay-survivor 3 more times
+    drops anything that pass-then-fails; reports flake_rate
+
        ↓
 
   trace transcriber then output/<run-id>/<name>.spec.ts
-                       then run-report.json (plan, verdicts, cost, cascade)
+                       then run-report.json (plan, verdicts, cost, cascade,
+                                             replay, stability)
 ```
 
 ```mermaid
 flowchart LR
     classDef stage fill:#1a1a22,stroke:#b9a6ff,color:#f5f5f7
+    classDef verify fill:#1a1f1a,stroke:#5dd5a4,color:#5dd5a4
     classDef optional fill:#131318,stroke:#f4c560,stroke-dasharray:5 5,color:#f4c560
     classDef io fill:#0d0d10,stroke:#5b5b66,color:#9d9da7
     classDef memory fill:#0d0d10,stroke:#5dd5a4,color:#5dd5a4
@@ -85,6 +98,8 @@ flowchart LR
     REV["Review checkpoint"]:::optional
     E["Explorer (Opus 4.7) tool-use loop"]:::stage
     C["Critic (Sonnet 4.6) ship, weak, fix"]:::stage
+    R["Reality-Check Replay (zero LLM)"]:::verify
+    S["Stability Iteration 3x (zero LLM)"]:::verify
     T["Transcriber + axe-core"]:::stage
     H["Healer (Sonnet 4.6) on-demand"]:::stage
     SPEC["Spec file (.ts or .js)"]:::io
@@ -96,7 +111,9 @@ flowchart LR
     REV -.->|from plan| E
     P --> E
     E --> C
-    C --> T
+    C --> R
+    R --> S
+    S --> T
     T --> SPEC
     SPEC --> CI
     SPEC -.->|on failure| H
@@ -109,11 +126,11 @@ flowchart LR
 
 ### The selector cascade
 
-QA-Core picks selectors in this order: `getByRole`, then `getByLabel`, then `getByTestId`, then CSS as a last resort. The level that resolved each call is logged. The transcriber emits the most resilient selector available, and the Critic can flag overuse of CSS.
+QA-Core picks selectors in this order: `getByRole`, then `getByLabel`, then `getByTestId`, then CSS as a last resort. A level only "wins" when it resolves to exactly one element. When a role / label match resolves to multiple elements, the cascade records an `ambiguous` flag and the transcriber emits `.first()` honestly — no silent strict-mode violations in CI. The level that resolved each call is logged and the Critic can flag overuse of CSS.
 
 ### Auto-injected accessibility checks
 
-Every generated spec ships with an `@axe-core/playwright` accessibility check against the landing page. You get WCAG 2 AA coverage by default.
+Every generated spec ships with an `@axe-core/playwright` accessibility check against the landing page. The check fails only on `critical` and `serious` WCAG 2 AA violations and logs the rest. This was a deliberate change in v2 — a zero-tolerance gate is unshippable because real marketing pages routinely have low-severity color-contrast nits that swamp the signal.
 
 ### Per-host memory
 
@@ -303,46 +320,57 @@ Prompt caching is enabled on three cached blocks: the frozen behavior rules, the
 
 ## Evaluation results
 
-QA-Core ships an evaluation suite that runs the agent against three public test sites, executes the generated specs, and publishes pass-rate, flake-rate, cost, and selector cascade distribution.
+QA-Core ships an evaluation suite that runs the agent against three public test sites, executes the generated specs, and publishes pass-rate, replay pass count, flake_rate, cost, and selector cascade distribution.
 
 ```bash
 npm run eval
 # writes eval-results/<timestamp>/summary.md
 ```
 
-Latest run is from 2026-05-14. First-run unfiltered, no self-healing applied.
+### v1 → v2 — same eval harness, same budget, hardening pass shipped between
 
-The first column below shows the original inline output from the eval harness. The second column shows the same agent trace re-emitted through the Page Object Model framework. Same scenarios. Same browser session. Better code emission target.
+| Site | v1 (2026-05-14) | **v2 (2026-06-09)** | Delta |
+| ---- | --------------: | ------------------: | ----: |
+| saucedemo | 80% (4/5) | **100% (6/6)** | +20 pp |
+| the-internet | 0% (0/6) | **50% (2/4)** | +50 pp |
+| practice-todo | 0% (0/4) | **75% (3/4)** | +75 pp |
+| **Aggregate** | **27% (4/15)** | **79% (11/14)** | **+52 pp** |
+| **Cost** | **$0.7997** | **$0.7940** | flat |
 
-| Site | Pass-rate (inline) | Pass-rate (POM) |
-| ---- | -----------------: | --------------: |
-| saucedemo | 50% | 83% |
-| the-internet | 29% | 43% |
-| practice-todo | 17% | 67% |
-| **Aggregate** | **6 of 19 = 32%** | **12 of 19 = 63%** |
+v2-specific metrics that v1 had no equivalent for:
 
-POM almost doubles the first-run pass-rate. The reason is consistency. When locators live as typed class fields, the same selector is used in every scenario and across reruns. Inline emission was free to pick a different selector flavour per test, and that introduced flake.
+| Site | Replay pass / fail | Stable | Flaky | Broken | flake_rate |
+| ---- | -----------------: | -----: | ----: | -----: | ---------: |
+| saucedemo | 5 / 0 | 5 | 0 | 0 | 0.0% |
+| the-internet | 4 / 1 | 3 | 1 | 0 | 25.0% |
+| practice-todo | 3 / 0 | 3 | 0 | 0 | 0.0% |
 
-Total cost: $0.7697 across the three sites in 5 minutes 38 seconds. Remaining failures fall into three buckets: selector drift in dynamic DOMs (TodoMVC), strict URL assertions, and unhandled timing on JS-heavy widgets. Each one is a candidate for `npm run heal` to repair, or for the next round of Critic policy tuning. Full breakdown: [`eval-results/2026-05-14T08-04-45-447Z/summary.md`](./eval-results/2026-05-14T08-04-45-447Z/summary.md).
+In the v2 eval, the Reality-Check Replay caught and dropped 1 scenario that passed exploration but failed an independent re-run. The Stability Iteration caught and dropped 1 scenario that pass-then-failed across 3 re-runs. **v1 would have shipped both of those.** v2 caught them before write.
 
-> **A note on absolute pass-rates.** Single-run aggregate numbers are noisy. Public test sites sometimes rate-limit, sleep (Heroku free tier), or rotate selectors. A different eval run in our history showed saucedemo at 80 percent but the-internet at 0 percent, purely because a Heroku cold-start exceeded the default 15 second navigation timeout. The signal worth quoting is the inline-vs-POM delta on identical traces, because that comparison controls for site flakiness. The jump from 32 percent to 63 percent is real and reproducible. Any headline like "we got X percent today" is not. Treat any single eval run as one data point, not the truth.
+Full breakdown: [`docs/v2-eval-summary.md`](./docs/v2-eval-summary.md) (a stable copy of the latest eval; `eval-results/` itself is gitignored as a runtime output directory).
+
+> **A note on absolute pass-rates.** Single-run aggregate numbers are noisy. Public test sites sometimes rate-limit, sleep (Heroku free tier), or rotate selectors. The signal worth quoting is the **v1 → v2 delta on identical sites and identical budget**, because that comparison controls for site flakiness — the same noise is in both columns. The jump from 27 percent to 79 percent at flat cost is reproducible. Any single eval run remains one data point, not the truth.
 
 ## Project layout
 
 ```text
 src/
   agent/
-    runtime.ts        # multi-agent pipeline (Planner, Explorer, Critic) + budgets
-    planner.ts        # Haiku pre-step: scenario derivation from one DOM snapshot
-    critic.ts         # Sonnet post-step: per-scenario ship/weak/fix verdicts
-    memory.ts         # per-host fingerprints + project memory, cached into prompt
-    heal.ts           # selector self-healing, re-resolves broken calls live
-    tools.ts          # Playwright tool surface exposed to Claude
-    selectors.ts      # role, label, testid, CSS cascade resolver
-    transcriber.ts    # legacy single-file emission (verified trace to inline spec)
+    runtime.ts        # five-stage pipeline orchestrator + budgets
+    planner.ts        # [stage 1] Haiku pre-step: scenario derivation from one DOM snapshot
+    tools.ts          # [stage 2] Playwright tool surface exposed to Opus
+    critic.ts         # [stage 3] Sonnet post-step: per-scenario ship/weak/fix verdicts
+    replay.ts         # [stage 4] Reality-Check Replay (zero LLM): re-executes scenarios
+    stability.ts      # [stage 5] Stability Iteration (zero LLM): 3x re-runs, flake_rate
+    selectors.ts      # role, label, testid, CSS cascade resolver with strict-mode guard
+    transcriber.ts    # inline emission (verified trace to single .spec file)
     pom.ts            # Page Object Model emitter (default): BasePage + per-page classes
     trace.ts          # types: Scenario, TraceStep, Assertion, RunReport
     generate.ts       # /generate: story to spec, no browser
+    heal.ts           # selector self-healing, re-resolves broken calls live
+    memory.ts         # per-host fingerprints + project memory, cached into prompt
+    eval-shim.ts      # __name no-op shim installed into every browser context
+    csv.ts            # CSV utilities for the --review plan-approval flow
   cli/
     explore.ts        # npm run explore
     generate.ts       # npm run generate
@@ -352,12 +380,14 @@ src/
   mcp/
     server.ts         # MCP server: exposes qa_explore, qa_generate, qa_heal
 docs/
-  DOCUMENTATION.md    # full reference
+  DOCUMENTATION.md    # full reference, high-level architecture
+  CODEBASE.md         # file-by-file engineering reference (this file's parent)
   architecture.html   # full-page architecture infographic
   architecture.svg    # single-image flow diagram
   MCP.md              # MCP install guide for Claude Desktop, Cursor, Cline
 scripts/
   eval.ts             # npm run eval
+  smoke-*.ts          # regression-protection smoke tests (seven of them)
 tests/
   auth.setup.ts       # storage-state fixture for auth-gated apps
 .qa-core/             # per-host memory cache (gitignored)

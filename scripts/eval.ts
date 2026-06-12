@@ -44,6 +44,18 @@ interface SiteResult {
   durationSec: number;
   cost: { usd: number; tokens: number };
   cascade: Record<string, number>;
+  /** Reality-check replay: scenarios that passed twice / scenarios attempted. */
+  replay?: { passed: number; failed: number; durationMs: number };
+  /** Stability iteration verdict: counts + flake_rate. */
+  stability?: {
+    iterations: number;
+    passed: number;
+    flaked: number;
+    flaky: number;
+    broken: number;
+    flakeRate: number;
+    durationMs: number;
+  };
   error?: string;
 }
 
@@ -89,6 +101,20 @@ async function main(): Promise<void> {
         durationSec: Math.round((Date.now() - startedAt) / 1000),
         cost: { usd: report.cost.usd, tokens: report.cost.inputTokens + report.cost.outputTokens },
         cascade: report.cascadeStats,
+        replay: report.replay && !report.replay.skipped
+          ? { passed: report.replay.passed, failed: report.replay.failed, durationMs: report.replay.durationMs }
+          : undefined,
+        stability: report.stability && !report.stability.skipped
+          ? {
+              iterations: report.stability.iterations,
+              passed: report.stability.passed,
+              flaked: report.stability.flaked,
+              flaky: report.stability.flaky ?? 0,
+              broken: report.stability.broken ?? 0,
+              flakeRate: report.stability.flakeRate,
+              durationMs: report.stability.durationMs,
+            }
+          : undefined,
       });
       console.log(`  ${testRun.passed}/${testRun.total} passed · ${(report.cost.usd).toFixed(4)} USD · ${Math.round((Date.now() - startedAt) / 1000)}s`);
     } catch (err) {
@@ -156,6 +182,19 @@ function renderMarkdown(results: SiteResult[]): string {
   for (const r of results) {
     const rate = r.tests > 0 ? `${Math.round((r.passed / r.tests) * 100)}%` : '—';
     lines.push(`| ${r.name} | ${r.scenarios} | ${r.tests} | ${r.passed} | ${r.failed} | ${r.flaky} | ${rate} | ${r.cost.usd.toFixed(4)} | ${r.cost.tokens} | ${r.durationSec}s |`);
+  }
+  lines.push('');
+
+  // v2 columns: reality-check replay + stability iteration.
+  lines.push(`## Reality-check replay & stability iteration`);
+  lines.push('');
+  lines.push(`| Site | Replay pass | Replay fail | Stable | Flaky | Broken | flake_rate |`);
+  lines.push(`|---|---:|---:|---:|---:|---:|---:|`);
+  for (const r of results) {
+    const rp = r.replay;
+    const st = r.stability;
+    const fr = st ? `${(st.flakeRate * 100).toFixed(1)}%` : '—';
+    lines.push(`| ${r.name} | ${rp?.passed ?? '—'} | ${rp?.failed ?? '—'} | ${st?.passed ?? '—'} | ${st?.flaky ?? '—'} | ${st?.broken ?? '—'} | ${fr} |`);
   }
   lines.push('');
   const totalTests = results.reduce((s, r) => s + r.tests, 0);

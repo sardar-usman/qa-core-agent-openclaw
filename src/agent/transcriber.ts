@@ -44,6 +44,13 @@ export function transcribe(opts: TranscribeOptions): TranscribeResult {
   lines.push(` */`);
   lines.push('');
   lines.push(`test.describe(${q(titleFromUrl(report.url))}, () => {`);
+  // Per-test isolation: fresh cookies + storage per scenario. The agent runs
+  // exploration with the same isolation, so this matches recorded behavior.
+  lines.push(`  test.beforeEach(async ({ context, page }) => {`);
+  lines.push(`    await context.clearCookies();`);
+  lines.push(`    try { await page.evaluate(() => { localStorage.clear(); sessionStorage.clear(); }); } catch { /* about:blank */ }`);
+  lines.push(`  });`);
+  lines.push('');
   for (const scenario of report.scenarios) {
     emitScenario(lines, scenario, ext);
   }
@@ -100,18 +107,24 @@ function emitAssertion(a: Assertion): string[] {
 }
 
 function loc(record: SelectorRecord): string {
-  return emitLocatorCall(record.level, record.arg);
+  return emitLocatorCall(record.level, record.arg, record.ambiguous === true);
 }
 
-function emitA11ySpec(url: string, ext: 'ts' | 'js'): string {
-  // Auto-injected accessibility check on the landing page.
-  const head = ext === 'ts' ? `  test('a11y: landing page has no detectable WCAG violations', async ({ page }) => {`
-                            : `  test('a11y: landing page has no detectable WCAG violations', async ({ page }) => {`;
+function emitA11ySpec(url: string, _ext: 'ts' | 'js'): string {
+  // Auto-injected accessibility check on the landing page. We fail only on
+  // critical/serious WCAG violations and surface the full report on failure.
+  // Moderate/minor issues are visible via the report but do not fail the run,
+  // since marketing-style pages routinely have low-severity nits that swamp
+  // signal when the gate is strict-zero.
   return [
-    head,
+    `  test('a11y: landing page has no critical/serious WCAG violations', async ({ page }) => {`,
     `    await page.goto(${q(url)});`,
     `    const results = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa']).analyze();`,
-    `    expect(results.violations, JSON.stringify(results.violations, null, 2)).toEqual([]);`,
+    `    const blocking = results.violations.filter(v => v.impact === 'critical' || v.impact === 'serious');`,
+    `    if (blocking.length) {`,
+    `      console.error('a11y blocking violations:\\n' + JSON.stringify(blocking, null, 2));`,
+    `    }`,
+    `    expect(blocking).toEqual([]);`,
     `  });`,
   ].join('\n');
 }

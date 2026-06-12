@@ -313,11 +313,11 @@ async function handleExplore(url: string, lang: 'ts' | 'js', model: string | und
     onEvent: (e) => {
       switch (e.type) {
         case 'plan_started':
-          send(ws, { text: '**[1/3] Planner**' });
+          send(ws, { text: '**[1/5] Planner**' });
           break;
         case 'plan_done': {
           const lines = e.scenarios.map((s) => `  • [${s.category}] ${s.name}`).join('\n');
-          send(ws, { text: `${e.scenarios.length} scenarios planned · $${e.usd.toFixed(4)}\n${lines}\n\n**[2/3] Explorer**` });
+          send(ws, { text: `${e.scenarios.length} scenarios planned · $${e.usd.toFixed(4)}\n${lines}\n\n**[2/5] Explorer**` });
           break;
         }
         case 'tool_call':
@@ -333,7 +333,7 @@ async function handleExplore(url: string, lang: 'ts' | 'js', model: string | und
           if (e.text.trim().length > 0 && e.text.length < 240) send(ws, { text: e.text.trim() });
           break;
         case 'critic_started':
-          send(ws, { text: '**[3/3] Critic**' });
+          send(ws, { text: '**[3/5] Critic**' });
           break;
         case 'critic_done': {
           const lines = e.verdicts.map((v) => {
@@ -341,6 +341,32 @@ async function handleExplore(url: string, lang: 'ts' | 'js', model: string | und
             return `  ${mark} ${v.scenario} — ${v.reason}`;
           }).join('\n');
           send(ws, { text: `${e.verdicts.length} verdicts · $${e.usd.toFixed(4)}\n${lines}` });
+          break;
+        }
+        case 'replay_started':
+          send(ws, { text: `**[4/5] Reality check** — replaying ${e.total} scenario(s) headlessly` });
+          break;
+        case 'replay_scenario_passed':
+          send(ws, { text: `  ✓ ${e.name} (${e.durationMs}ms)` });
+          break;
+        case 'replay_scenario_failed':
+          send(ws, { text: `  ✗ ${e.name} — step ${e.failedStep + 1} (${e.stepKind}): ${e.error}` });
+          break;
+        case 'replay_done':
+          send(ws, { text: `${e.passed} passed twice · ${e.failed} dropped · ${(e.durationMs / 1000).toFixed(1)}s` });
+          break;
+        case 'stability_started':
+          send(ws, { text: `**[5/5] Stability** — running ${e.iterations}× re-runs on ${e.total} replay survivor(s)` });
+          break;
+        case 'stability_iteration_failed':
+          // Iteration passes are noisy (3 per scenario); surface only the failures.
+          send(ws, { text: `  ✗ ${e.name} (iter ${e.iteration}) — step ${e.failedStep + 1} (${e.stepKind}): ${e.error}` });
+          break;
+        case 'stability_done': {
+          const pct = (e.flakeRate * 100).toFixed(1);
+          send(ws, {
+            text: `${e.stable} stable · ${e.flaked} flaked across ${e.iterations}× re-runs · flake_rate ${pct}% · ${(e.durationMs / 1000).toFixed(1)}s`,
+          });
           break;
         }
       }
@@ -361,12 +387,25 @@ async function handleExplore(url: string, lang: 'ts' | 'js', model: string | und
   const totalUsd = report.cost.usd + (report.cost.plannerUsd ?? 0) + (report.cost.criticUsd ?? 0);
 
   // Summary message.
+  let replayLine = '';
+  if (report.replay && !report.replay.skipped) {
+    const total = report.replay.passed + report.replay.failed;
+    const pct = total > 0 ? Math.round((report.replay.passed / total) * 100) : 0;
+    replayLine = `\nReality check: ${report.replay.passed}/${total} passed twice (${pct}%)`;
+  }
+  let stabilityLine = '';
+  if (report.stability && !report.stability.skipped) {
+    const flakePct = (report.stability.flakeRate * 100).toFixed(1);
+    stabilityLine = `\nStability: ${report.stability.passed} stable · ${report.stability.flaky ?? 0} flaky · ${report.stability.broken ?? 0} broken across ${report.stability.iterations}× re-runs · flake_rate ${flakePct}%`;
+  }
   send(ws, {
     text:
       `**Done.** Wrote \`${path.relative(process.cwd(), specPath)}\` (${scenarios} scenarios).\n` +
       `Cost: $${totalUsd.toFixed(4)} total ` +
       `(planner $${(report.cost.plannerUsd ?? 0).toFixed(4)}, explorer $${report.cost.usd.toFixed(4)}, critic $${(report.cost.criticUsd ?? 0).toFixed(4)})\n` +
       `Cascade: ${JSON.stringify(report.cascadeStats)}` +
+      replayLine +
+      stabilityLine +
       (report.review?.summary ? `\n\n**Critic summary:** ${report.review.summary}` : ''),
   });
 

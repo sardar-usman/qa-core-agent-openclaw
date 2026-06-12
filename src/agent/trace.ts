@@ -33,6 +33,12 @@ export interface SelectorRecord {
   arg: ResolvedLocator['arg'];
   /** Original intent recorded so the transcriber can comment the spec usefully. */
   intent: string;
+  /**
+   * True when the cascade resolved to multiple elements at the winning level
+   * and had to take `.first()`. The transcriber emits `.first()` in this case
+   * so the runtime spec does not trip Playwright's strict-mode guard.
+   */
+  ambiguous?: boolean;
 }
 
 export type Assertion =
@@ -50,6 +56,10 @@ export interface Scenario {
   name: string;
   category: 'happy' | 'negative' | 'edge' | 'a11y';
   steps: TraceStep[];
+  /** Console messages of level 'error' / 'warning' that fired during the scenario. */
+  consoleErrors?: Array<{ kind: 'error' | 'warning'; text: string }>;
+  /** Responses with status >= 400 that fired during the scenario. */
+  networkErrors?: Array<{ status: number; url: string }>;
 }
 
 export interface RunReport {
@@ -80,5 +90,66 @@ export interface RunReport {
   review?: {
     verdicts: Array<{ scenario: string; verdict: 'ship' | 'weak' | 'fix'; reason: string }>;
     summary: string;
+  };
+  /**
+   * Reality check: each scenario was re-executed in a fresh Playwright context
+   * after the Critic. Scenarios that fail replay are dropped from `scenarios`
+   * before transcription, so the emitted spec only contains traces that passed
+   * twice — once during exploration and once on independent replay.
+   */
+  replay?: {
+    /** True only when the replay pass was disabled (--no-replay or programmatic). */
+    skipped?: boolean;
+    /** Count of scenarios that passed replay (matches scenarios.length when not skipped). */
+    passed: number;
+    /** Count of scenarios that failed replay and were dropped from the emitted spec. */
+    failed: number;
+    /** Wall-clock time spent on replay. */
+    durationMs: number;
+    /** Per-scenario verdicts including failure step index and error excerpt. */
+    verdicts: Array<{
+      name: string;
+      passed: boolean;
+      failedStep?: number;
+      stepKind?: TraceStep['kind'];
+      error?: string;
+      durationMs: number;
+    }>;
+  };
+  /**
+   * Stability iteration: each replay survivor is re-executed N times in fresh
+   * Playwright contexts. Scenarios that pass-then-fail are dropped as flaky.
+   * `flakeRate` = flaked / total survivors entering the stage, the headline
+   * metric for "how reliable is the emitted spec."
+   */
+  stability?: {
+    skipped?: boolean;
+    iterations: number;
+    /** Scenarios that passed every iteration (kept in the emitted spec). */
+    passed: number;
+    /** Scenarios that failed at least one iteration (dropped as flaky). */
+    flaked: number;
+    /** flaked / (passed + flaked). 0 when there were no scenarios to test. */
+    flakeRate: number;
+    durationMs: number;
+    /** Subset of `flaked` classified flaky (≥1 pass, ≥1 fail). */
+    flaky?: number;
+    /** Subset of `flaked` classified broken (zero passes across iterations). */
+    broken?: number;
+    verdicts: Array<{
+      name: string;
+      iterations: number;
+      passes: number;
+      stable: boolean;
+      classification?: 'stable' | 'flaky' | 'broken';
+      pattern?: string;
+      firstFailure?: {
+        iteration: number;
+        failedStep: number;
+        stepKind: TraceStep['kind'] | 'unknown';
+        error: string;
+      };
+      durationMs: number;
+    }>;
   };
 }

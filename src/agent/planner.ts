@@ -1,5 +1,6 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { chromium } from 'playwright';
+import { installEvalShim } from './eval-shim.js';
 
 /**
  * Planner — Step 1 of the multi-agent pipeline.
@@ -35,12 +36,17 @@ Constraints:
 - Categories: happy, negative, edge, a11y.
 - Skip scenarios you cannot verify from a single page (e.g., end-to-end checkout if only the login page is visible).
 
-Return strictly in this format, nothing else:
+a11y category guidance — only propose an a11y scenario when one of these is verifiable from the page:
+- A keyboard-only flow: Tab through the form, Enter / Space to activate, assert the resulting state. Name it like "completed login using keyboard only".
+- Semantic structure: critical content uses a proper role (main, alert, navigation) or accessible name. Name it like "error message is announced via role=alert".
+- DO NOT propose an a11y scenario that is merely "page renders" or "heading is visible" — those are happy-path, not accessibility.
+
+Return strictly in this format, nothing else. The square brackets around the category are LITERAL — include them in your output exactly as shown:
 
 <plan>
-1. [category] scenario-name — one-line rationale
-2. [category] scenario-name — one-line rationale
-...
+1. [happy] logged in with valid credentials — verifies the success path lands on the inventory page
+2. [negative] rejects invalid password — verifies the inline error message appears
+3. [edge] handles whitespace-padded username — verifies trimming or validation behavior
 </plan>`;
 
 const PLANNER_PRICE = { in: 1.0, out: 5.0 }; // Haiku 4.5 default
@@ -59,10 +65,13 @@ export async function plan(opts: {
   const browser = await chromium.launch({ headless: true });
   try {
     const ctx = await browser.newContext();
+    await installEvalShim(ctx);
     const page = await ctx.newPage();
-    await page.goto(opts.url, { waitUntil: 'domcontentloaded' });
+    await page.goto(opts.url, { waitUntil: 'load' });
+    // Function declarations only — tsx injects `__name` wrappers for arrow
+    // funcs assigned to consts, which break when serialized to page.evaluate.
     const snapshot = await page.evaluate(() => {
-      const pick = (el: Element) => {
+      function pick(el: Element): Record<string, unknown> {
         const r = el as HTMLElement;
         return {
           tag: r.tagName.toLowerCase(),
@@ -70,7 +79,7 @@ export async function plan(opts: {
           label: (r.getAttribute('aria-label') ?? r.getAttribute('placeholder') ?? r.getAttribute('name') ?? (r.textContent ?? '').trim().slice(0, 80)) || undefined,
           type: (r as HTMLInputElement).type ?? undefined,
         };
-      };
+      }
       return {
         title: document.title,
         url: location.href,
@@ -116,8 +125,16 @@ function parsePlan(text: string): PlannedScenario[] {
     .filter((l) => /^\d+[.)]/.test(l));
   const out: PlannedScenario[] = [];
   for (const raw of lines) {
-    // "1. [happy] scenario name — rationale"
-    const match = raw.match(/^\d+[.)]\s*\[(happy|negative|edge|a11y)\]\s*(.+?)\s*[—-]+\s*(.+)$/i);
+    // Forgiving parser. Haiku has shown four distinct format variants across
+    // runs:
+    //   "1. [happy] name — rationale"     ← what the prompt asks for
+    //   "1. happy name — rationale"       ← drops the brackets
+    //   "1. happy — name — rationale"     ← em-dash after the category
+    //   "1. happy: name — rationale"      ← colon after the category
+    // All carry the same meaning. We accept any of them. Hyphen is NOT allowed
+    // as the name-rationale separator (it appears inside many real words like
+    // "well-formed"); only em-dash / en-dash count.
+    const match = raw.match(/^\d+[.)]\s*\[?(happy|negative|edge|a11y)\]?\s*[:\-—–]?\s*(.+?)\s*[—–]+\s*(.+)$/i);
     if (match && match[1] && match[2] && match[3]) {
       out.push({
         name: match[2].trim(),

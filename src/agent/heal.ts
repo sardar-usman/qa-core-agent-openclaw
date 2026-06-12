@@ -4,6 +4,7 @@ import path from 'node:path';
 import { chromium, type Browser, type Page } from 'playwright';
 import Anthropic from '@anthropic-ai/sdk';
 import { resolve as resolveSelector, type CascadeLevel } from './selectors.js';
+import { installEvalShim } from './eval-shim.js';
 
 /**
  * Self-healing selectors.
@@ -113,9 +114,10 @@ export async function heal(opts: HealOptions): Promise<HealResult> {
 
       // Open fresh page, ask Claude for a replacement, verify it resolves.
       const ctx = await browser.newContext();
+      await installEvalShim(ctx);
       const page = await ctx.newPage();
       try {
-        await page.goto(failure.url, { waitUntil: 'domcontentloaded' });
+        await page.goto(failure.url, { waitUntil: 'load' });
         const proposal = await proposeNewSelector(client, model, {
           page, failure, oldCall: call,
         });
@@ -296,8 +298,10 @@ async function proposeNewSelector(
   model: string,
   args: { page: Page; failure: FailureContext; oldCall: SelectorCall },
 ): Promise<HealProposal | null> {
+  // Function declarations only — tsx injects `__name` wrappers for arrow
+  // funcs assigned to consts, which break when serialized to page.evaluate.
   const snapshot = await args.page.evaluate(() => {
-    const pick = (el: Element) => {
+    function pick(el: Element): Record<string, unknown> {
       const r = el as HTMLElement;
       const text = (r.getAttribute('aria-label') ?? r.getAttribute('placeholder') ?? r.getAttribute('name') ?? (r.textContent ?? '').trim().slice(0, 60)) || undefined;
       return {
@@ -307,7 +311,7 @@ async function proposeNewSelector(
         testid: r.getAttribute('data-testid') ?? undefined,
         type: (r as HTMLInputElement).type ?? undefined,
       };
-    };
+    }
     return {
       inputs:  Array.from(document.querySelectorAll('input, textarea, select')).slice(0, 40).map(pick),
       buttons: Array.from(document.querySelectorAll('button, [role="button"], [type="submit"]')).slice(0, 40).map(pick),

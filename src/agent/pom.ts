@@ -433,7 +433,7 @@ function renderPageClass(plan: PageClassPlan, ext: 'ts' | 'js'): string {
     out.push(`  constructor(page: Page) {`);
     out.push(`    super(page);`);
     for (const f of plan.fields) {
-      out.push(`    this.${f.name} = ${emitLocatorCall(f.record.level, f.record.arg)};`);
+      out.push(`    this.${f.name} = ${emitLocatorCall(f.record.level, f.record.arg, f.record.ambiguous === true)};`);
     }
     out.push(`  }`);
     for (const m of plan.methods) {
@@ -453,7 +453,7 @@ function renderPageClass(plan: PageClassPlan, ext: 'ts' | 'js'): string {
   out.push(`    super(page);`);
   out.push(`    this.url = ${q(plan.url)};`);
   for (const f of plan.fields) {
-    out.push(`    this.${f.name} = ${emitLocatorCall(f.record.level, f.record.arg)};`);
+    out.push(`    this.${f.name} = ${emitLocatorCall(f.record.level, f.record.arg, f.record.ambiguous === true)};`);
   }
   out.push(`  }`);
   for (const m of plan.methods) {
@@ -480,17 +480,17 @@ function emitMethod(method: ActionMethod, intentToField: Map<string, string>, ex
       paramIdx++;
       body.push(field
         ? `await this.${field}.fill(${valueArg});`
-        : `await ${emitLocatorCall(step.target.level, step.target.arg)}.fill(${valueArg});`);
+        : `await ${emitLocatorCall(step.target.level, step.target.arg, step.target.ambiguous === true)}.fill(${valueArg});`);
     } else if (step.kind === 'click') {
       const field = intentToField.get(canonicalIntent(step.target.intent));
       body.push(field
         ? `await this.${field}.click();`
-        : `await ${emitLocatorCall(step.target.level, step.target.arg)}.click();`);
+        : `await ${emitLocatorCall(step.target.level, step.target.arg, step.target.ambiguous === true)}.click();`);
     } else if (step.kind === 'press') {
       const field = intentToField.get(canonicalIntent(step.target.intent));
       body.push(field
         ? `await this.${field}.press(${q(step.key)});`
-        : `await ${emitLocatorCall(step.target.level, step.target.arg)}.press(${q(step.key)});`);
+        : `await ${emitLocatorCall(step.target.level, step.target.arg, step.target.ambiguous === true)}.press(${q(step.key)});`);
     }
   }
   return [sig, ...body.map((l) => '  ' + l), `}`];
@@ -528,7 +528,10 @@ function renderSpec(report: RunReport, pageClasses: PageClassPlan[], ext: 'ts' |
     }
   }
   out.push('');
-  out.push(`  test.beforeEach(async ({ page }) => {`);
+  out.push(`  test.beforeEach(async ({ context, page }) => {`);
+  // Per-test isolation: matches the agent's exploration-time isolation.
+  out.push(`    await context.clearCookies();`);
+  out.push(`    try { await page.evaluate(() => { localStorage.clear(); sessionStorage.clear(); }); } catch { /* about:blank */ }`);
   for (const pc of pageClasses) {
     out.push(`    ${camelize(pc.className)} = new ${pc.className}(page);`);
   }
@@ -601,19 +604,19 @@ function emitStepCall(step: TraceStep, pc: PageClassPlan, handle: string): strin
       const field = pc.intentToField.get(canonicalIntent(step.target.intent));
       return field
         ? `await ${handle}.${field}.click();`
-        : `await ${emitLocatorCall(step.target.level, step.target.arg)}.click();`;
+        : `await ${emitLocatorCall(step.target.level, step.target.arg, step.target.ambiguous === true)}.click();`;
     }
     case 'fill': {
       const field = pc.intentToField.get(canonicalIntent(step.target.intent));
       return field
         ? `await ${handle}.${field}.fill(${q(step.value)});`
-        : `await ${emitLocatorCall(step.target.level, step.target.arg)}.fill(${q(step.value)});`;
+        : `await ${emitLocatorCall(step.target.level, step.target.arg, step.target.ambiguous === true)}.fill(${q(step.value)});`;
     }
     case 'press': {
       const field = pc.intentToField.get(canonicalIntent(step.target.intent));
       return field
         ? `await ${handle}.${field}.press(${q(step.key)});`
-        : `await ${emitLocatorCall(step.target.level, step.target.arg)}.press(${q(step.key)});`;
+        : `await ${emitLocatorCall(step.target.level, step.target.arg, step.target.ambiguous === true)}.press(${q(step.key)});`;
     }
     case 'wait':
       return `await page.waitForTimeout(${step.ms});`;
@@ -630,13 +633,13 @@ function emitAssertion(a: Assertion, pc: PageClassPlan, handle: string): string 
   switch (a.type) {
     case 'toBeVisible': {
       const field = pc.intentToField.get(canonicalIntent(a.target.intent));
-      const loc = field ? `${handle}.${field}` : emitLocatorCall(a.target.level, a.target.arg);
+      const loc = field ? `${handle}.${field}` : emitLocatorCall(a.target.level, a.target.arg, a.target.ambiguous === true);
       return `await expect(${loc}).toBeVisible();`;
     }
     case 'toHaveText':
     case 'toContainText': {
       const field = pc.intentToField.get(canonicalIntent(a.target.intent));
-      const loc = field ? `${handle}.${field}` : emitLocatorCall(a.target.level, a.target.arg);
+      const loc = field ? `${handle}.${field}` : emitLocatorCall(a.target.level, a.target.arg, a.target.ambiguous === true);
       const fn = a.type === 'toHaveText' ? 'toHaveText' : 'toContainText';
       return `await expect(${loc}).${fn}(${q(a.text)});`;
     }
@@ -644,7 +647,7 @@ function emitAssertion(a: Assertion, pc: PageClassPlan, handle: string): string 
       return `await expect(page).toHaveURL(new RegExp(${q(a.pattern)}));`;
     case 'toHaveCount': {
       const field = pc.intentToField.get(canonicalIntent(a.target.intent));
-      const loc = field ? `${handle}.${field}` : emitLocatorCall(a.target.level, a.target.arg);
+      const loc = field ? `${handle}.${field}` : emitLocatorCall(a.target.level, a.target.arg, a.target.ambiguous === true);
       return `await expect(${loc}).toHaveCount(${a.count});`;
     }
   }
@@ -660,10 +663,12 @@ function renderA11ySpec(url: string, ext: 'ts' | 'js'): string {
     out.push(`const AxeBuilder = require('@axe-core/playwright').default;`);
   }
   out.push('');
-  out.push(`test('a11y: landing page has no detectable WCAG 2 AA violations', async ({ page }) => {`);
+  out.push(`test('a11y: landing page has no critical/serious WCAG 2 AA violations', async ({ page }) => {`);
   out.push(`  await page.goto(${q(url)});`);
   out.push(`  const results = await new AxeBuilder({ page }).withTags(['wcag2a', 'wcag2aa']).analyze();`);
-  out.push(`  expect(results.violations, JSON.stringify(results.violations, null, 2)).toEqual([]);`);
+  out.push(`  const blocking = results.violations.filter(v => v.impact === 'critical' || v.impact === 'serious');`);
+  out.push(`  if (blocking.length) console.error('a11y blocking violations:\\n' + JSON.stringify(blocking, null, 2));`);
+  out.push(`  expect(blocking).toEqual([]);`);
   out.push(`});`);
   out.push('');
   return out.join('\n');

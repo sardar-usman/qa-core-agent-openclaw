@@ -7,6 +7,9 @@ import type { RunReport, Scenario } from './trace.js';
 import { renderMemoryBlock, saveRun, type RunSummary } from './memory.js';
 import { plan, type PlannedScenario } from './planner.js';
 import { critique } from './critic.js';
+import { replay, type ReplayEvent } from './replay.js';
+import { stability, type StabilityEvent } from './stability.js';
+import { installEvalShim } from './eval-shim.js';
 import type { CascadeLevel } from './selectors.js';
 import { writeCsv } from './csv.js';
 
@@ -37,6 +40,29 @@ Rules:
 - Negative scenarios should record assertions on the failure state (e.g. an error message appearing), not on success URLs.
 - Stay within your step budget. Be decisive. Do not loop on get_dom.
 
+Assertion economy:
+- One strong, specific assertion (an exact error string, the destination URL, a concrete element count) is worth more than several weak ones.
+- If you have already asserted the definitive outcome of the scenario, DO NOT pad with redundant toBeVisible / toHaveURL checks on the same state. Padding adds noise and weakens the suite.
+- Prefer toHaveText / toContainText / toHaveURL over toBeVisible whenever the outcome can be expressed as text or location.
+
+a11y scenarios must actually exercise accessibility:
+- An a11y scenario MUST do one of the following, not just check that something is visible:
+  (a) Drive a flow using only the keyboard — use press("Tab") to traverse fields and press("Enter") or press("Space") to activate controls, then assert the outcome.
+  (b) Assert on SEMANTIC role / accessible name — e.g. that the page exposes a "main" landmark, an "alert" role for error messages, or that a button is reachable via getByRole rather than CSS.
+- For (a), the closing assertion MUST verify the keyboard action SUCCEEDED:
+    GOOD: assert toHaveURL("/secure/") after a keyboard-only login (URL changed → login worked).
+    GOOD: assert toContainText on a success/error flash that only appears after submit.
+    GOOD: assert that the previously-visible login form is now hidden / no longer in the DOM.
+    BAD:  assert toBeVisible on the Username input you just typed into (it was visible before, this proves nothing).
+    BAD:  end the scenario with no assertion that depends on the keyboard outcome.
+- A scenario whose only assertion is toBeVisible on a static element is NOT an a11y scenario. Re-categorize it as happy / edge before ending the scenario.
+
+CRITICAL — each scenario runs in isolation:
+- begin_scenario CLEARS cookies, localStorage, and sessionStorage.
+- The transcribed spec gives each test a fresh browser context, matching what begin_scenario does here.
+- Therefore every scenario MUST be SELF-CONTAINED: include the navigate + any login/setup steps it needs.
+- Never write a scenario that assumes the previous scenario left state behind (e.g. "I am already logged in"). If two scenarios share setup, repeat the setup steps in both.
+
 Do not write code. Use the tools.`;
 
 export interface ExploreOptions {
@@ -50,6 +76,22 @@ export interface ExploreOptions {
   skipPlan?: boolean;
   /** Skip the Critic post-step (default: enabled). */
   skipCritic?: boolean;
+  /**
+   * Skip the replay reality-check (default: enabled). When skipped, the
+   * Transcriber emits every recorded scenario whether or not it replays.
+   * Disable only for cost-sensitive runs; replay itself is free (no LLM).
+   */
+  skipReplay?: boolean;
+  /** Override the replay step timeout. Defaults to 10s. */
+  replayTimeoutMs?: number;
+  /**
+   * Skip the stability iteration (default: enabled). Stability re-runs every
+   * replay survivor N times and drops any that fail an iteration. Free of LLM
+   * cost; the trade-off is wall-clock time.
+   */
+  skipStability?: boolean;
+  /** Number of stability iterations per scenario. Defaults to 3. */
+  stabilityIterations?: number;
   /**
    * Review mode: after Planner runs, export the scenario list to plan.csv and
    * exit. Resume the run with `fromPlan` once the CSV has been reviewed.
@@ -89,6 +131,14 @@ export type AgentEvent =
   | { type: 'usage'; usd: number; tokens: number }
   | { type: 'critic_started' }
   | { type: 'critic_done'; verdicts: Array<{ scenario: string; verdict: string; reason: string }>; usd: number }
+  | { type: 'replay_started'; total: number }
+  | { type: 'replay_scenario_passed'; name: string; durationMs: number }
+  | { type: 'replay_scenario_failed'; name: string; failedStep: number; stepKind: string; error: string }
+  | { type: 'replay_done'; passed: number; failed: number; durationMs: number }
+  | { type: 'stability_started'; total: number; iterations: number }
+  | { type: 'stability_iteration_passed'; name: string; iteration: number; durationMs: number }
+  | { type: 'stability_iteration_failed'; name: string; iteration: number; failedStep: number; stepKind: string; error: string }
+  | { type: 'stability_done'; stable: number; flaked: number; iterations: number; flakeRate: number; durationMs: number }
   | { type: 'done'; scenarios: number };
 
 const PRICE = {
@@ -173,6 +223,7 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
     context = await browser.newContext(
       fs.existsSync(storageStatePath) ? { storageState: storageStatePath } : undefined,
     );
+    await installEvalShim(context);
     const page: Page = await context.newPage();
 
     const ctx = createContext(page, maxSteps);
@@ -183,10 +234,17 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
       onEvent: opts.onEvent,
     });
 
-    // The agent must call finish; if it didn't, capture whatever it did record.
-    scenarios = ctx.current
-      ? (ctx.scenarios.push(ctx.current), ctx.scenarios)
-      : ctx.scenarios;
+    // The agent must call finish; if it didn't, capture whatever it did record
+    // — but apply the SAME assertion guard end_scenario and finish enforce.
+    // Without this, a scenario the agent began and then abandoned (timed out,
+    // turn limit, gave up on a keyboard a11y flow) lands in the spec with
+    // zero steps or no asserts. Empty scenarios pass Replay / Stability /
+    // Playwright runtime vacuously and silently inflate failure rates.
+    if (ctx.current) {
+      const hasAssert = ctx.current.steps.some((s) => s.kind === 'assert');
+      if (hasAssert) ctx.scenarios.push(ctx.current);
+    }
+    scenarios = ctx.scenarios;
     cascadeStats = ctx.cascadeStats;
     steps = ctx.steps;
     cost = { ...explorerCost, plannerUsd: planResult.usd };
@@ -209,10 +267,152 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
     }
   }
 
+  // Step 4 — Reality check (replay). Re-execute every scenario in a fresh
+  // Playwright context and drop the ones that fail. Survivors are what the
+  // Transcriber emits. Zero LLM cost; this is just Playwright.
+  let replayInfo: RunReport['replay'];
+  let emittedScenarios = scenarios;
+  if (!opts.skipReplay && scenarios.length > 0) {
+    try {
+      const storageStatePath = path.join(process.cwd(), 'playwright', '.auth', 'user.json');
+      const r = await replay({
+        scenarios,
+        storageStatePath,
+        timeoutMs: opts.replayTimeoutMs,
+        onEvent: (ev: ReplayEvent) => {
+          switch (ev.type) {
+            case 'replay_started':
+              opts.onEvent?.({ type: 'replay_started', total: ev.total });
+              return;
+            case 'scenario_passed':
+              opts.onEvent?.({ type: 'replay_scenario_passed', name: ev.name, durationMs: ev.durationMs });
+              return;
+            case 'scenario_failed':
+              opts.onEvent?.({
+                type: 'replay_scenario_failed',
+                name: ev.name,
+                failedStep: ev.failedStep,
+                stepKind: ev.stepKind,
+                error: ev.error,
+              });
+              return;
+            case 'replay_done':
+              opts.onEvent?.({
+                type: 'replay_done',
+                passed: ev.passed,
+                failed: ev.failed,
+                durationMs: ev.durationMs,
+              });
+              return;
+            default:
+              return;
+          }
+        },
+      });
+      emittedScenarios = r.emitted;
+      replayInfo = {
+        passed: r.emitted.length,
+        failed: r.dropped.length,
+        durationMs: r.durationMs,
+        verdicts: r.verdicts,
+      };
+    } catch (err) {
+      opts.onEvent?.({ type: 'message', text: `Replay skipped: ${(err as Error).message}` });
+      replayInfo = { skipped: true, passed: 0, failed: 0, durationMs: 0, verdicts: [] };
+    }
+  } else if (opts.skipReplay) {
+    replayInfo = { skipped: true, passed: 0, failed: 0, durationMs: 0, verdicts: [] };
+  }
+
+  // Step 5 — Stability iteration. Re-execute each replay survivor N times and
+  // drop the ones that pass-then-fail. Only scenarios that pass every
+  // iteration make it into the final emitted spec.
+  let stabilityInfo: RunReport['stability'];
+  if (!opts.skipStability && emittedScenarios.length > 0) {
+    try {
+      const storageStatePath = path.join(process.cwd(), 'playwright', '.auth', 'user.json');
+      const s = await stability({
+        scenarios: emittedScenarios,
+        storageStatePath,
+        iterations: opts.stabilityIterations,
+        timeoutMs: opts.replayTimeoutMs,
+        onEvent: (ev: StabilityEvent) => {
+          switch (ev.type) {
+            case 'stability_started':
+              opts.onEvent?.({ type: 'stability_started', total: ev.total, iterations: ev.iterations });
+              return;
+            case 'iteration_passed':
+              opts.onEvent?.({
+                type: 'stability_iteration_passed',
+                name: ev.name,
+                iteration: ev.iteration,
+                durationMs: ev.durationMs,
+              });
+              return;
+            case 'iteration_failed':
+              opts.onEvent?.({
+                type: 'stability_iteration_failed',
+                name: ev.name,
+                iteration: ev.iteration,
+                failedStep: ev.failedStep,
+                stepKind: ev.stepKind,
+                error: ev.error,
+              });
+              return;
+            case 'stability_done':
+              opts.onEvent?.({
+                type: 'stability_done',
+                stable: ev.stable,
+                flaked: ev.flaked,
+                iterations: ev.iterations,
+                flakeRate: ev.flakeRate,
+                durationMs: ev.durationMs,
+              });
+              return;
+            default:
+              return;
+          }
+        },
+      });
+      emittedScenarios = s.emitted;
+      stabilityInfo = {
+        iterations: s.iterations,
+        passed: s.emitted.length,
+        flaked: s.flaked.length,
+        flaky: s.flaky.length,
+        broken: s.broken.length,
+        flakeRate: s.flakeRate,
+        durationMs: s.durationMs,
+        verdicts: s.verdicts,
+      };
+    } catch (err) {
+      opts.onEvent?.({ type: 'message', text: `Stability skipped: ${(err as Error).message}` });
+      stabilityInfo = {
+        skipped: true,
+        iterations: opts.stabilityIterations ?? 3,
+        passed: 0,
+        flaked: 0,
+        flakeRate: 0,
+        durationMs: 0,
+        verdicts: [],
+      };
+    }
+  } else if (opts.skipStability) {
+    stabilityInfo = {
+      skipped: true,
+      iterations: opts.stabilityIterations ?? 3,
+      passed: 0,
+      flaked: 0,
+      flakeRate: 0,
+      durationMs: 0,
+      verdicts: [],
+    };
+  }
+
   const report: RunReport = {
     url: opts.url,
     language: opts.language,
-    scenarios,
+    scenarios: emittedScenarios,
     cascadeStats,
     cost,
     steps,
@@ -220,6 +420,8 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
     finishedAt: new Date().toISOString(),
     plan: planResult.scenarios.length > 0 ? planResult.scenarios : undefined,
     review,
+    replay: replayInfo,
+    stability: stabilityInfo,
   };
 
   fs.mkdirSync(opts.outDir, { recursive: true });
@@ -239,7 +441,10 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
     cascadeStats,
     resolvedIntents,
   };
-  try { saveRun(summary); } catch { /* memory is best-effort */ }
+  try { saveRun(summary); } catch (err) {
+    // Memory is best-effort, but silent failure is worse than a one-line warning.
+    process.stderr.write(`[qa-core] memory save failed: ${(err as Error).message}\n`);
+  }
 
   opts.onEvent?.({ type: 'done', scenarios: scenarios.length });
   return report;

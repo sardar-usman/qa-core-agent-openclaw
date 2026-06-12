@@ -2148,6 +2148,20 @@
   .pipe-row.done .pipe-state   { color: var(--emerald); }
   .pipe-row.error .pipe-state  { color: var(--rose); }
 
+  .pipe-stats {
+    margin-top: 3px;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--text-3);
+    letter-spacing: 0;
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .pipe-stats .stat-stable  { color: var(--emerald); }
+  .pipe-stats .stat-flaky   { color: #c89d3a; }
+  .pipe-stats .stat-broken  { color: var(--rose); }
+
   /* Week-stats card */
   .week-stats {
     display: grid;
@@ -2500,6 +2514,35 @@
 
   .run-card.open .run-card-body { display: block; }
 
+  .run-card-metric {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 10px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--text-2);
+    padding: 5px 0;
+    border-bottom: 1px dashed var(--line);
+    margin-bottom: 6px;
+  }
+  .run-card-metric .metric-label {
+    font-family: inherit;
+    font-size: 10.5px;
+    letter-spacing: 0.5px;
+    text-transform: uppercase;
+    color: var(--text-3);
+    min-width: 96px;
+  }
+  .run-card-metric .metric-pill {
+    background: var(--bg-3);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 1px 7px;
+    font-size: 10.5px;
+    color: var(--text-3);
+  }
+
   .run-card-verdicts {
     display: flex;
     flex-direction: column;
@@ -2755,6 +2798,10 @@
               <span class="tagline-chip"><b>Opus</b> explores</span>
               <span class="tagline-dot"></span>
               <span class="tagline-chip"><b>Sonnet</b> reviews</span>
+              <span class="tagline-dot"></span>
+              <span class="tagline-chip"><b>Replay</b> verifies</span>
+              <span class="tagline-dot"></span>
+              <span class="tagline-chip"><b>Stability</b> proves</span>
               <span class="tagline-meta">Live progress appears here while a command runs.</span>
             </div>
 
@@ -2777,6 +2824,21 @@
                 <div class="pipe-dot"></div>
                 <div>
                   <div class="pipe-name">Critic <span class="pipe-model">Sonnet 4.6</span></div>
+                </div>
+                <div class="pipe-state">idle</div>
+              </div>
+              <div class="pipe-row" id="pipeReplay">
+                <div class="pipe-dot"></div>
+                <div>
+                  <div class="pipe-name">Reality-Check <span class="pipe-model">Playwright · zero LLM</span></div>
+                </div>
+                <div class="pipe-state">idle</div>
+              </div>
+              <div class="pipe-row" id="pipeStability">
+                <div class="pipe-dot"></div>
+                <div>
+                  <div class="pipe-name">Stability <span class="pipe-model">3× re-run · zero LLM</span></div>
+                  <div class="pipe-stats" id="pipeStabilityStats" hidden></div>
                 </div>
                 <div class="pipe-state">idle</div>
               </div>
@@ -3472,7 +3534,9 @@ function simulateExplore(url) {
   bubble.innerHTML = 'Explored <strong>' + escHtml(url) + '</strong><br><br>' +
     'Found: 3 inputs · 1 button · 1 error container<br>' +
     'Flows: Login (happy path), Failed login, Empty submission<br><br>' +
-    'Generated <strong>6 tests</strong>: 1 happy path, 4 negative, 1 edge case.';
+    'Generated <strong>6 tests</strong>: 1 happy path, 4 negative, 1 edge case.<br>' +
+    'Reality-check <strong>6/6</strong> passed twice · Stability <strong>6 stable · 0 flaky · 0 broken</strong> across 3× re-run.<br>' +
+    'Diagnostics: 0 console errors · 0 network 4xx/5xx during exploration.';
   bubble.appendChild(buildCodeBlock(codeLines, 'TypeScript', 'login.spec.ts'));
 
   msgs.appendChild(el);
@@ -3491,8 +3555,11 @@ function simulateExplore(url) {
     plannerUsd: 0.001,
     explorerUsd: 0.076,
     criticUsd: 0.005,
+    replay:    { passed: 6, failed: 0, durationMs: 4200 },
+    stability: { iterations: 3, passed: 6, flaked: 0, flaky: 0, broken: 0, flakeRate: 0, durationMs: 9100 },
+    diagnostics: { consoleErrors: 0, networkErrors: 0 },
     spec: codeLines,
-    summary: 'Login flow with 6 tests · 1 happy path, 4 negative, 1 edge case.',
+    summary: 'Login flow with 6 tests · every scenario passed exploration + replay + 3× stability re-run.',
     verdicts: [
       { verdict: 'ship', scenario: 'logged in with valid credentials',  reason: 'URL assertion confirms inventory page' },
       { verdict: 'ship', scenario: 'rejects wrong password',           reason: 'error container becomes visible' },
@@ -3592,8 +3659,17 @@ function simulatePipelineAndPersist(run) {
       setTimeout(() => {
         setPipeStage('critic', 'done');
         addSessionCost(run.criticUsd || 0);
-        setPipelineOverall('done');
-        saveRun(run);
+        setPipeStage('replay', 'active');
+        setTimeout(() => {
+          setPipeStage('replay', 'done');
+          setPipeStage('stability', 'active');
+          setTimeout(() => {
+            setPipeStage('stability', 'done');
+            renderStabilityStats(run.stability);
+            setPipelineOverall('done');
+            saveRun(run);
+          }, 700);
+        }, 500);
       }, 600);
     }, 900);
   }, 600);
@@ -3950,13 +4026,18 @@ function renderDashboard() {
   }
 
   // Sites grid
+  // BUG FIX: avgPass was dividing sum-of-passRates by TOTAL runs, but most
+  // `/explore` runs have passRate=null (no Playwright execution alongside).
+  // The result was the average getting diluted toward 0 — a site with two
+  // 75%-pass eval runs out of nine total `/explore` runs read as "17% pass".
+  // The correct denominator is the count of runs that actually have data.
   const sitesMap = new Map();
   for (const r of runs) {
     if (!r.host) continue;
-    const cur = sitesMap.get(r.host) || { host: r.host, runs: 0, passes: 0, tests: 0, lastAt: 0 };
+    const cur = sitesMap.get(r.host) || { host: r.host, runs: 0, runsWithPass: 0, passes: 0, tests: 0, lastAt: 0 };
     cur.runs++;
     cur.tests += r.scenarios || 0;
-    if (typeof r.passRate === 'number') cur.passes += r.passRate;
+    if (typeof r.passRate === 'number') { cur.passes += r.passRate; cur.runsWithPass++; }
     if (r.timestamp > cur.lastAt) cur.lastAt = r.timestamp;
     sitesMap.set(r.host, cur);
   }
@@ -3965,7 +4046,7 @@ function renderDashboard() {
   const sitesGrid = document.getElementById('dashSitesGrid');
   if (sitesGrid) {
     const cards = sites.map(s => {
-      const avgPass = s.runs ? Math.round(s.passes / s.runs) : null;
+      const avgPass = s.runsWithPass ? Math.round(s.passes / s.runsWithPass) : null;
       // Fix 4: same thresholds as recent-runs. >=90 ok, 60-89 warn, <60 bad.
       const cls = avgPass == null ? '' : avgPass >= 90 ? 'ok' : avgPass >= 60 ? 'warn' : 'bad';
       return `<div class="site-card ${cls}" onclick="fillInput('/explore https://${escAttr(s.host)}/')">
@@ -4060,6 +4141,30 @@ function runCardHtml(r) {
         <div class="verdict-line"><span class="v ${escAttr(v.verdict)}">${escHtml(v.verdict)}</span><span>${escHtml(v.scenario || '')}${v.reason ? '. ' + escHtml(v.reason) : ''}</span></div>
       `).join('')}</div>`
     : '';
+  // Reality-check + stability + diagnostics lines (only when present).
+  const stabilityLine = r.stability
+    ? `<div class="run-card-metric">
+         <span class="metric-label">Stability</span>
+         <span class="stat-stable">${r.stability.passed || 0} stable</span>
+         <span class="stat-flaky">${r.stability.flaky || 0} flaky</span>
+         <span class="stat-broken">${r.stability.broken || 0} broken</span>
+         <span class="metric-pill">flake_rate ${((r.stability.flakeRate || 0) * 100).toFixed(1)}%</span>
+       </div>`
+    : '';
+  const replayLine = r.replay
+    ? `<div class="run-card-metric">
+         <span class="metric-label">Reality-check</span>
+         <span class="stat-stable">${r.replay.passed || 0} passed twice</span>
+         ${r.replay.failed ? `<span class="stat-broken">${r.replay.failed} dropped</span>` : ''}
+       </div>`
+    : '';
+  const diagLine = r.diagnostics && (r.diagnostics.consoleErrors || r.diagnostics.networkErrors)
+    ? `<div class="run-card-metric">
+         <span class="metric-label">Diagnostics</span>
+         <span class="${r.diagnostics.consoleErrors ? 'stat-broken' : ''}">${r.diagnostics.consoleErrors || 0} console err</span>
+         <span class="${r.diagnostics.networkErrors ? 'stat-broken' : ''}">${r.diagnostics.networkErrors || 0} net 4xx/5xx</span>
+       </div>`
+    : '';
   const status = r.passRate == null ? '' : r.passRate + '% pass';
   return `<div class="run-card" data-id="${r.id}">
     <div class="run-card-head">
@@ -4071,6 +4176,9 @@ function runCardHtml(r) {
       <div class="run-card-status">${status}</div>
     </div>
     <div class="run-card-body">
+      ${replayLine}
+      ${stabilityLine}
+      ${diagLine}
       ${verdicts}
       ${r.summary ? `<div style="font-size:11.5px;color:var(--text-2);line-height:1.5;margin-bottom:8px">${escHtml(r.summary)}</div>` : ''}
       <div class="run-card-actions">
@@ -4090,7 +4198,7 @@ function setText(id, v) { const el = document.getElementById(id); if (el) el.tex
 let pipelineUserExpanded = false;  // user clicked the chevron, keep their choice
 
 function setPipeStage(stage, state) {
-  // stage: 'planner' | 'explorer' | 'critic' | 'healer'
+  // stage: 'planner' | 'explorer' | 'critic' | 'replay' | 'stability' | 'healer'
   // state: 'idle' | 'active' | 'done' | 'error' | 'skipped'
   const row = document.getElementById('pipe' + stage.charAt(0).toUpperCase() + stage.slice(1));
   if (row) {
@@ -4138,7 +4246,12 @@ function resetPipeline() {
   setPipeStage('planner', 'idle');
   setPipeStage('explorer', 'idle');
   setPipeStage('critic', 'idle');
+  setPipeStage('replay', 'idle');
+  setPipeStage('stability', 'idle');
   setPipeStage('healer', 'idle');
+  // Clear stability breakdown chips when the pipeline resets.
+  const stats = document.getElementById('pipeStabilityStats');
+  if (stats) { stats.innerHTML = ''; stats.setAttribute('hidden', ''); }
   const overall = document.getElementById('pipeStateOverall');
   if (overall) overall.textContent = 'idle';
   // Clear user override when the whole pipeline resets, return to compact.
@@ -4149,6 +4262,22 @@ function resetPipeline() {
 function setPipelineOverall(state) {
   const overall = document.getElementById('pipeStateOverall');
   if (overall) overall.textContent = state;
+}
+
+/**
+ * Render the stable / flaky / broken breakdown under the Stability pipe row.
+ * Mirrors the new RunReport.stability fields produced by src/agent/stability.ts.
+ */
+function renderStabilityStats(s) {
+  const el = document.getElementById('pipeStabilityStats');
+  if (!el || !s) return;
+  const flakeRatePct = ((s.flakeRate || 0) * 100).toFixed(1);
+  el.innerHTML =
+    '<span class="stat-stable">' + (s.passed || 0) + ' stable</span>' +
+    '<span class="stat-flaky">'  + (s.flaky  || 0) + ' flaky</span>' +
+    '<span class="stat-broken">' + (s.broken || 0) + ' broken</span>' +
+    '<span>flake_rate=' + flakeRatePct + '%</span>';
+  el.removeAttribute('hidden');
 }
 
 /* ---------- P0-4: Syntax-highlighted code viewer ---------- */
