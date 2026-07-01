@@ -114,7 +114,7 @@ export function loadProjectMemory(): ProjectMemory {
   if (!fs.existsSync(PROJECT_FILE)) {
     return {
       updatedAt: new Date().toISOString(),
-      cascadeStats: { role: 0, label: 0, testid: 0, css: 0 },
+      cascadeStats: { role: 0, label: 0, placeholder: 0, text: 0, alt: 0, title: 0, testid: 0, css: 0, xpath: 0 },
     };
   }
   try {
@@ -122,7 +122,7 @@ export function loadProjectMemory(): ProjectMemory {
   } catch {
     return {
       updatedAt: new Date().toISOString(),
-      cascadeStats: { role: 0, label: 0, testid: 0, css: 0 },
+      cascadeStats: { role: 0, label: 0, placeholder: 0, text: 0, alt: 0, title: 0, testid: 0, css: 0, xpath: 0 },
     };
   }
 }
@@ -184,12 +184,17 @@ function mergeCascade(
   a: Record<CascadeLevel, number> | undefined,
   b: Record<CascadeLevel, number>,
 ): Record<CascadeLevel, number> {
-  const base = a ?? { role: 0, label: 0, testid: 0, css: 0 };
+  const base = a ?? { role: 0, label: 0, placeholder: 0, text: 0, alt: 0, title: 0, testid: 0, css: 0, xpath: 0 };
   return {
     role: (base.role ?? 0) + (b.role ?? 0),
     label: (base.label ?? 0) + (b.label ?? 0),
+    placeholder: (base.placeholder ?? 0) + (b.placeholder ?? 0),
+    text: (base.text ?? 0) + (b.text ?? 0),
+    alt: (base.alt ?? 0) + (b.alt ?? 0),
+    title: (base.title ?? 0) + (b.title ?? 0),
     testid: (base.testid ?? 0) + (b.testid ?? 0),
     css: (base.css ?? 0) + (b.css ?? 0),
+    xpath: (base.xpath ?? 0) + (b.xpath ?? 0),
   };
 }
 

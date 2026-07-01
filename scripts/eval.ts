@@ -123,7 +123,7 @@ async function main(): Promise<void> {
         scenarios: 0, tests: 0, passed: 0, failed: 0, flaky: 0,
         durationSec: Math.round((Date.now() - startedAt) / 1000),
         cost: { usd: 0, tokens: 0 },
-        cascade: { role: 0, label: 0, testid: 0, css: 0 },
+        cascade: { role: 0, label: 0, placeholder: 0, testid: 0, css: 0 },
         error: (err as Error).message,
       });
       console.log(`  ✗ ${(err as Error).message}`);
@@ -205,10 +205,10 @@ function renderMarkdown(results: SiteResult[]): string {
   lines.push('');
   lines.push(`## Selector cascade distribution`);
   lines.push('');
-  lines.push(`| Site | role | label | testid | css |`);
-  lines.push(`|---|---:|---:|---:|---:|`);
+  lines.push(`| Site | role | label | placeholder | testid | css |`);
+  lines.push(`|---|---:|---:|---:|---:|---:|`);
   for (const r of results) {
-    lines.push(`| ${r.name} | ${r.cascade.role ?? 0} | ${r.cascade.label ?? 0} | ${r.cascade.testid ?? 0} | ${r.cascade.css ?? 0} |`);
+    lines.push(`| ${r.name} | ${r.cascade.role ?? 0} | ${r.cascade.label ?? 0} | ${r.cascade.placeholder ?? 0} | ${r.cascade.testid ?? 0} | ${r.cascade.css ?? 0} |`);
   }
   return lines.join('\n');
 }

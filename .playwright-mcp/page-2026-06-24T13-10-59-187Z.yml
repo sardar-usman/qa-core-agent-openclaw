@@ -1,0 +1,186 @@
+- generic [ref=e2]:
+  - banner [ref=e3]:
+    - generic [ref=e4]:
+      - generic [ref=e5]:
+        - img [ref=e7]
+        - generic [ref=e9]:
+          - generic [ref=e10]: QA-Core
+          - generic [ref=e11]: Autonomous QA Agent
+        - generic [ref=e16]: live
+      - generic [ref=e17]:
+        - generic [ref=e20]: disconnected
+        - generic [ref=e21]:
+          - textbox "Gateway URL" [ref=e22]:
+            - /placeholder: ws://127.0.0.1:18789
+            - text: ws://127.0.0.1:18789
+          - button "Connect" [ref=e23] [cursor=pointer]
+  - main [ref=e24]:
+    - generic [ref=e26]:
+      - complementary [ref=e28]:
+        - generic [ref=e29]:
+          - generic [ref=e30]: Commands
+          - generic [ref=e31]: "3"
+        - generic [ref=e32]:
+          - button "/explore UI Exploration Open a live URL, explore it, and generate a Playwright suite with Page Object Model. /explore <url> Click to use →" [ref=e33] [cursor=pointer]:
+            - generic [ref=e34]:
+              - generic [ref=e35]: /explore
+              - img [ref=e37]
+            - generic [ref=e40]: UI Exploration
+            - paragraph [ref=e41]: Open a live URL, explore it, and generate a Playwright suite with Page Object Model.
+            - generic [ref=e42]:
+              - generic [ref=e43]: /explore <url>
+              - generic [ref=e44]: Click to use →
+          - button "/generate Story to Tests Turn a user story or Jira ticket into scenarios and Playwright code. /generate <user story> Click to use →" [ref=e45] [cursor=pointer]:
+            - generic [ref=e46]:
+              - generic [ref=e47]: /generate
+              - img [ref=e49]
+            - generic [ref=e51]: Story to Tests
+            - paragraph [ref=e52]: Turn a user story or Jira ticket into scenarios and Playwright code.
+            - generic [ref=e53]:
+              - generic [ref=e54]: /generate <user story>
+              - generic [ref=e55]: Click to use →
+          - button "/heal Self-Healing Re-resolve broken selectors in a spec against the live page. /heal <spec-path> Click to use →" [ref=e56] [cursor=pointer]:
+            - generic [ref=e57]:
+              - generic [ref=e58]: /heal
+              - img [ref=e60]
+            - generic [ref=e65]: Self-Healing
+            - paragraph [ref=e66]: Re-resolve broken selectors in a spec against the live page.
+            - generic [ref=e67]:
+              - generic [ref=e68]: /heal <spec-path>
+              - generic [ref=e69]: Click to use →
+        - generic [ref=e70]:
+          - generic [ref=e71]: Total
+          - generic [ref=e72]:
+            - generic [ref=e73]:
+              - generic [ref=e74]: Tests
+              - generic [ref=e75]: "0"
+            - generic [ref=e76]:
+              - generic [ref=e77]: Runs
+              - generic [ref=e78]: "0"
+            - generic [ref=e79]:
+              - generic [ref=e80]: Files
+              - generic [ref=e81]: "0"
+            - generic [ref=e82]:
+              - generic [ref=e83]: Avg pass-rate
+              - generic [ref=e84]: —
+      - generic [ref=e85]:
+        - generic [ref=e87]:
+          - generic [ref=e88]:
+            - generic [ref=e90]: QA Automation Agent
+            - heading "QA-Core Agent" [level=1] [ref=e91]
+            - paragraph [ref=e92]: An autonomous QA agent that drives a real browser, reviews its own work, and writes Playwright suites that have already passed once before they ship. Powered by Claude. OpenClaw runtime.
+          - generic [ref=e93]:
+            - generic [ref=e94]:
+              - generic [ref=e95]:
+                - generic [ref=e97]: GATEWAY
+                - generic [ref=e98]: offline
+              - generic [ref=e99]:
+                - generic [ref=e101]: PLAYWRIGHT
+                - generic [ref=e102]: ready
+              - generic [ref=e103]:
+                - generic [ref=e105]: COST
+                - generic [ref=e106]: $0.0000
+              - button "o Opus 4.7" [ref=e108] [cursor=pointer]:
+                - generic [ref=e109]: o
+                - generic [ref=e110]: Opus 4.7
+                - img [ref=e111]
+            - button "Refresh" [ref=e113] [cursor=pointer]:
+              - img [ref=e114]
+              - text: Refresh
+        - generic [ref=e117]:
+          - generic [ref=e118]:
+            - generic [ref=e119]:
+              - generic [ref=e120]:
+                - generic [ref=e121]: Pipeline status
+                - generic [ref=e122]: idle
+              - button "Collapse pipeline" [ref=e123] [cursor=pointer]:
+                - img [ref=e124]
+            - generic [ref=e127]:
+              - generic [ref=e128]:
+                - 'generic "Planner: idle" [ref=e130]':
+                  - generic [ref=e131]: Haiku
+                  - generic [ref=e132]: plans
+                - 'generic "Explorer: idle" [ref=e135]':
+                  - generic [ref=e136]: Opus
+                  - generic [ref=e137]: explores
+                - 'generic "Critic: idle" [ref=e140]':
+                  - generic [ref=e141]: Sonnet
+                  - generic [ref=e142]: reviews
+                - 'generic "Reality-check: idle" [ref=e145]':
+                  - generic [ref=e146]: Replay
+                  - generic [ref=e147]: verifies
+                - 'generic "Stability: idle" [ref=e150]':
+                  - generic [ref=e151]: Stability
+                  - generic [ref=e152]: proves
+              - generic [ref=e153]: Live progress appears here while a command runs.
+          - generic [ref=e154]:
+            - generic [ref=e155]:
+              - generic [ref=e156]: Total
+              - button "All runs" [ref=e157] [cursor=pointer]
+            - generic [ref=e158]:
+              - generic [ref=e159]:
+                - generic [ref=e160]: Runs
+                - generic [ref=e161]: "0"
+              - generic [ref=e162]:
+                - generic [ref=e163]: Tests generated
+                - generic [ref=e164]: "0"
+              - generic [ref=e165]:
+                - generic [ref=e166]: Avg pass-rate
+                - generic [ref=e167]: no data
+              - generic [ref=e168]:
+                - generic [ref=e169]: Total cost
+                - generic [ref=e170]: $0.00
+            - generic [ref=e173]:
+              - generic [ref=e174]: runs with pass-rate data
+              - generic [ref=e175]: 0%
+        - generic [ref=e176]:
+          - generic [ref=e178]:
+            - generic [ref=e179]: Recent runs
+            - generic [ref=e180]: "0"
+          - generic [ref=e181]:
+            - generic [ref=e182]: No runs yet
+            - paragraph [ref=e183]:
+              - text: Try
+              - code [ref=e184]: /explore https://www.saucedemo.com/
+              - text: in the terminal below.
+        - generic [ref=e185]:
+          - generic [ref=e186]:
+            - generic [ref=e187]: Sites tested
+            - generic [ref=e188]: "0"
+          - button "Add a site" [ref=e190] [cursor=pointer]:
+            - img [ref=e192]
+            - generic [ref=e193]: Add a site
+        - generic [ref=e194]:
+          - generic [ref=e195]:
+            - generic [ref=e201]: qa-core · terminal
+            - generic [ref=e202]:
+              - generic [ref=e203]:
+                - button "ts" [ref=e204] [cursor=pointer]
+                - button "js" [ref=e205] [cursor=pointer]
+              - generic [ref=e206]: simulator
+          - generic [ref=e209]:
+            - generic [ref=e210]: qa-core $ welcome to QA-Core terminal
+            - generic [ref=e211]: Type /explore <url>, /generate <story>, or /heal <spec> to begin.
+            - generic [ref=e212]: "Pipeline runs: Planner → Explorer → Critic → Reality-check → Stability."
+          - generic [ref=e213]:
+            - button "/explore saucedemo" [ref=e214] [cursor=pointer]
+            - button "/explore practicesoftwaretesting" [ref=e215] [cursor=pointer]
+            - button "/generate login story" [ref=e216] [cursor=pointer]
+            - generic [ref=e217]: "output: ts"
+          - generic [ref=e218]:
+            - generic [ref=e219]: qa-core $
+            - textbox "Command input" [ref=e220]:
+              - /placeholder: Type a command or message. Try /explore or /generate
+            - button "Send" [disabled] [ref=e221]:
+              - img [ref=e222]
+      - complementary [ref=e225]:
+        - generic [ref=e226]:
+          - generic [ref=e228]: Activity
+          - button "Refresh" [ref=e229] [cursor=pointer]:
+            - img [ref=e230]
+        - generic [ref=e233]:
+          - tablist [ref=e234]:
+            - tab "results" [selected] [ref=e235] [cursor=pointer]: results
+            - tab "files" [ref=e237] [cursor=pointer]
+            - tab "log" [ref=e238] [cursor=pointer]
+          - paragraph [ref=e241]: No results yet. Run /explore to populate.

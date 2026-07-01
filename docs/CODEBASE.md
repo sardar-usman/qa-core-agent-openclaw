@@ -96,25 +96,6 @@ These run with `npx tsx scripts/<name>.ts`. They are deterministic and fast. Eac
 | `smoke-ui.ts` | `qa-core-ui.html` loads in real Chromium with zero JS console errors. Critical pipeline DOM nodes (Stability row, stats container) are present. |
 | `smoke-dashboard-math.ts` | Compares the old (buggy) vs new (fixed) per-site dashboard math against real on-disk runs. Confirms the fix produces sensible numbers, not just "different" numbers. |
 
-### Debug / one-off scripts
-
-These were created during investigation and kept for future debugging. Not part of any CI flow.
-
-| File | Purpose |
-|---|---|
-| `smoke-planner.ts` | Quick test that the Planner's `page.evaluate` snapshot runs cleanly on saucedemo (was originally used to diagnose the `__name` regression). |
-| `smoke-planner-live.ts` | End-to-end Planner check — calls the production `plan()` against saucedemo and prints parsed scenarios. Costs ~$0.001 in Haiku tokens. |
-| `debug-planner.ts` | Captures the RAW Haiku response for saucedemo before any parsing. Used to discover that Haiku was dropping the `[category]` brackets. |
-| `probe-tsx.ts` | Tiny probe that prints what `tsx` does to inner functions inside `page.evaluate`. Used to confirm the `__name(fn, "name")` injection. |
-| `test-pom.ts` | One-off check of the POM transcriber output against a fixture trace. |
-
-### Doc-rendering scripts
-
-| File | Purpose |
-|---|---|
-| `render-architecture-png.ts` | Renders `docs/architecture.html` to `docs/architecture.png` via headless Chromium. Run after editing the architecture diagram. |
-| `render-features-pdf.ts` | Renders `docs/qa-core-features-report.html` to a PDF. Used to produce shareable feature reports. |
-
 ---
 
 ## `tests/` — Playwright auth setup
@@ -146,12 +127,9 @@ Three Markdown files that describe QA-Core's commands to the OpenClaw skill rout
 | `MCP.md` | Setup guide for using QA-Core's MCP server with Claude Desktop / Cursor / Cline / Continue / Zed. |
 | `architecture.html` | Editable HTML source for the architecture diagram. |
 | `architecture.png` / `architecture.svg` | Rendered architecture diagrams. Used in the README. |
-| `architecture-svg.png` | PNG export of `architecture.svg` for places that don't render SVG (e.g. some LinkedIn previews). |
 | `linkedin-card.svg` | LinkedIn share card image. |
 | `linkedin-drafts.md` | Drafts of LinkedIn posts (v1, v2, video script). |
-| `qa-core-features-report.html` / `.pdf` | A formatted feature catalog generated for marketing / sales conversations. |
 | `claude_desktop_config.example.json` | Example MCP server config to paste into Claude Desktop's settings. |
-| `agent-flow-frames/` | Static frames used in the agent-flow animation. |
 
 ---
 

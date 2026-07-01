@@ -8,6 +8,11 @@ import { generateFromStory } from '../agent/generate.js';
 import { heal } from '../agent/heal.js';
 import { transcribe } from '../agent/transcriber.js';
 import { transcribePOM } from '../agent/pom.js';
+import { scaffold, frameworkDirName, normalizeAndValidateUrl } from '../agent/scaffold.js';
+import { stripNpmStyleLeadingDashes, detectPastedCliCommand } from '../agent/parse-hints.js';
+import { zipFrameworkToBuffer } from '../agent/zip-framework.js';
+import { parseFeatures } from '../agent/parse-features.js';
+import { renderReconciliation } from '../agent/reconcile.js';
 
 /**
  * QA-Core gateway.
@@ -52,7 +57,14 @@ interface DiskRun {
   costUsd: number;
   spec: string;
   summary: string | null;
-  verdicts: Array<{ verdict: string; scenario: string; reason: string }> | null;
+  verdicts: Array<{ verdict: string; scenario: string; reasons: string[]; required_fixes: string[] }> | null;
+  /**
+   * Unique feature tags across this run's scenarios, in first-encountered
+   * order. The UI uses this to disambiguate multiple runs of the same site
+   * in the recent-runs panel (e.g. "saucedemo · login, cart"). Empty or
+   * absent when scenarios were not feature-tagged (legacy reports).
+   */
+  features: string[] | null;
 }
 
 function send(ws: WebSocket, payload: object): void {
@@ -228,9 +240,22 @@ function parseRunReport(dir: string, reportPath: string): DiskRun | null {
         if (total > 0) passRate = Math.round((expected / total) * 100);
       } catch { /* ignore */ }
     }
-    const review = (r.review ?? null) as { verdicts?: Array<{ verdict: string; scenario: string; reason: string }>; summary?: string } | null;
+    const review = (r.review ?? null) as { verdicts?: Array<{ verdict: string; scenario: string; reasons: string[]; required_fixes: string[] }>; summary?: string } | null;
     let host: string | null = null;
     try { host = url ? new URL(url).host : null; } catch { /* keep null */ }
+
+    // Collect unique feature tags across scenarios in first-encountered order.
+    // The UI uses these to disambiguate same-site runs in the recent-runs list.
+    let features: string[] | null = null;
+    if (Array.isArray(r.scenarios)) {
+      const seen = new Set<string>();
+      const ordered: string[] = [];
+      for (const sc of r.scenarios as Array<Record<string, unknown>>) {
+        const f = typeof sc?.feature === 'string' ? sc.feature.trim() : '';
+        if (f && !seen.has(f)) { seen.add(f); ordered.push(f); }
+      }
+      features = ordered.length > 0 ? ordered : null;
+    }
 
     return {
       id: 'disk_' + path.basename(dir),
@@ -244,6 +269,7 @@ function parseRunReport(dir: string, reportPath: string): DiskRun | null {
       spec,
       summary: review?.summary ?? null,
       verdicts: review?.verdicts ?? null,
+      features,
     };
   } catch {
     return null;
@@ -255,13 +281,107 @@ function parseRunReport(dir: string, reportPath: string): DiskRun | null {
 async function dispatch(content: string, msg: IncomingMessage, ws: WebSocket): Promise<void> {
   const lang = asLang(msg.lang);
 
+  // Catch users who pasted `npm run <cmd> -- <args>` into the chat. This is
+  // the #1 mistake we see: terminal syntax doesn't work in the chat, and the
+  // generic "command not recognised" reply doesn't tell them WHY.
+  const pasteHint = detectPastedCliCommand(content);
+  if (pasteHint) {
+    send(ws, {
+      text:
+        "Looks like you pasted a terminal command. In the dashboard, drop the " +
+        "`npm run ... --` prefix and use the slash command directly:\n\n" +
+        `  \`${pasteHint.suggestion}\``,
+    });
+    return;
+  }
+
   if (content.startsWith('/explore ')) {
-    const url = content.slice('/explore '.length).trim();
-    if (!url) {
-      send(ws, { text: 'Usage: `/explore <url>`' });
+    const initialRest = content.slice('/explore '.length).trim();
+    if (!initialRest) {
+      send(ws, { text: 'Usage: `/explore <url> [--features login,cart] [--no-stabilize] [or natural-language hint after the URL]`' });
       return;
     }
-    await handleExplore(url, lang, msg.model, ws);
+    // Strip leading `--` if the user carried over npm-style syntax. We only
+    // strip when what follows actually looks like a URL — otherwise let the
+    // validator produce its normal "doesn't look like a URL" error so the
+    // user knows the input was genuinely malformed.
+    const dashFix = stripNpmStyleLeadingDashes(initialRest);
+    if (dashFix.stripped) {
+      send(ws, {
+        text:
+          "Note: I removed the leading `--` for you — that's only needed when " +
+          "running the command through npm in your terminal.",
+      });
+    }
+    let rest = dashFix.cleaned;
+
+    // Parse --stabilize-attempts N from anywhere in the body, then strip
+    // it so the rest of the parsing doesn't see it as part of the URL or
+    // natural-language hint.
+    let maxStabilizeAttempts: number | undefined;
+    const attemptsMatch = rest.match(/(^|\s)--stabilize-attempts\s+(\d+)(?=\s|$)/);
+    if (attemptsMatch) {
+      const n = Number(attemptsMatch[2]);
+      if (Number.isFinite(n) && n >= 1 && Number.isInteger(n)) {
+        maxStabilizeAttempts = n;
+      }
+      rest = rest.replace(/(^|\s)--stabilize-attempts\s+\d+(?=\s|$)/g, '').trim();
+    }
+    // Accept three forms (per the v3 design):
+    //   1. /explore https://shop.com                                  → no features, Planner infers
+    //   2. /explore https://shop.com --features login,cart            → comma-flag
+    //   3. /explore https://shop.com test login and cart              → natural language
+    // Plus modifier flags that can appear anywhere after the URL:
+    //   --no-stabilize    skip Stage 5b (no LLM flake recovery)
+    // Strip modifier flags before URL/features parsing so they don't
+    // contaminate the natural-language hint or get mistaken for the URL.
+    const stabilize = !/(^|\s)--no-stabilize(\s|$)/.test(rest);
+    const restWithoutModifiers = rest.replace(/(^|\s)--no-stabilize(?=\s|$)/g, '').trim();
+    const featuresMatch = restWithoutModifiers.match(/--features\s+(\S+)/);
+    let url: string;
+    let flagInput: string | undefined;
+    let naturalInput: string | undefined;
+    if (featuresMatch) {
+      flagInput = featuresMatch[1];
+      const remainder = restWithoutModifiers.replace(/--features\s+\S+/, '').trim().split(/\s+/);
+      url = remainder[0] ?? '';
+    } else {
+      const parts = restWithoutModifiers.split(/\s+/);
+      url = parts[0] ?? '';
+      if (parts.length > 1) naturalInput = parts.slice(1).join(' ');
+    }
+    if (!url) {
+      send(ws, { text: 'Usage: `/explore <url> [--features login,cart] [--no-stabilize] [or natural-language hint after the URL]`' });
+      return;
+    }
+    // Validate the URL BEFORE spinning up the agent. Without this, an invalid
+    // URL ("--", "(ts)", "shop") would pass through to the Planner, the
+    // Planner would fail to navigate, and the agent would still scaffold an
+    // empty framework + charge the user. Fail fast instead.
+    const urlCheck = normalizeAndValidateUrl(url);
+    if (!urlCheck.ok) {
+      send(ws, {
+        text:
+          `✗ Couldn't run /explore: ${urlCheck.reason}.\n\n` +
+          'Try a full URL like:  `/explore https://www.saucedemo.com/`',
+      });
+      return;
+    }
+    if (urlCheck.normalized) {
+      send(ws, { text: `Note: I added https:// for you — using \`${urlCheck.url}\`.` });
+    }
+    const validUrl = urlCheck.url;
+    const parsed = await parseFeatures({ flagInput, naturalInput });
+    if (!stabilize) {
+      send(ws, { text: 'Note: Stabilizer (Stage 5b) is OFF — flaky scenarios will be dropped without an LLM recovery attempt.' });
+    }
+    if (maxStabilizeAttempts) {
+      send(ws, { text: `Note: Stabilizer will try up to ${maxStabilizeAttempts} fix attempt${maxStabilizeAttempts === 1 ? '' : 's'} per flaky scenario.` });
+    }
+    await handleExplore({
+      url: validUrl, lang, model: msg.model, features: parsed.features,
+      stabilize, maxStabilizeAttempts, ws,
+    });
     return;
   }
 
@@ -304,12 +424,41 @@ async function dispatch(content: string, msg: IncomingMessage, ws: WebSocket): P
 
 /* ─────────────────── /explore ─────────────────── */
 
-async function handleExplore(url: string, lang: 'ts' | 'js', model: string | undefined, ws: WebSocket): Promise<void> {
-  const outDir = path.join(process.cwd(), 'output', `${runId()}-${slugify(url)}`);
-  send(ws, { text: `▸ Exploring ${url} (${lang})\n  output: ${path.relative(process.cwd(), outDir)}` });
+interface HandleExploreOptions {
+  url: string;
+  lang: 'ts' | 'js';
+  model: string | undefined;
+  /** Empty array if user didn't specify features — Planner then infers from homepage. */
+  features: string[];
+  /** Run Stage 5b (Stabilizer). Defaults to true; false when user passes --no-stabilize. */
+  stabilize?: boolean;
+  /** Max Stabilizer attempts per flaky scenario. Defaults to 3 when undefined. */
+  maxStabilizeAttempts?: number;
+  ws: WebSocket;
+}
+
+async function handleExplore(opts: HandleExploreOptions): Promise<void> {
+  const { url, lang, model, features, stabilize, maxStabilizeAttempts, ws } = opts;
+  // New v3 output naming — site-named, no timestamp. Re-runs overwrite the
+  // previous framework (chosen design option). Wipe first so stale files
+  // (e.g. a page object from a previous run with different features) don't
+  // linger.
+  // v3.1 naming — "saucedemo-automation-framework" (brand slug, no www, no TLD).
+  const frameworkSlug = frameworkDirName(url);
+  const outDir = path.join(process.cwd(), 'output', frameworkSlug);
+  if (fs.existsSync(outDir)) {
+    fs.rmSync(outDir, { recursive: true, force: true });
+  }
+  const featuresLine = features.length > 0
+    ? `\n  features: ${features.join(', ')}`
+    : '\n  features: (none specified — Planner will infer from homepage)';
+  send(ws, { text: `▸ Exploring ${url} (${lang})${featuresLine}\n  output: ${path.relative(process.cwd(), outDir)}` });
 
   const result = await explore({
     url, language: lang, outDir, model,
+    features,
+    stabilize,
+    maxStabilizeAttempts,
     onEvent: (e) => {
       switch (e.type) {
         case 'plan_started':
@@ -330,15 +479,20 @@ async function handleExplore(url: string, lang: 'ts' | 'js', model: string | und
           if (!e.ok) send(ws, { text: `  ✗ ${e.error}` });
           break;
         case 'message':
-          if (e.text.trim().length > 0 && e.text.length < 240) send(ws, { text: e.text.trim() });
+          // Cap at 600 chars so a single noisy LLM message can't flood the
+          // chat, but high enough to allow multi-attempt Stabilizer events
+          // (e.g. "Stabilizer gave up ... tried: wait 4000ms → wait 12000ms
+          // → wait 15000ms" is ~150 chars; with longer scenario names it
+          // can push past the previous 240 cap and get silently dropped).
+          if (e.text.trim().length > 0 && e.text.length < 600) send(ws, { text: e.text.trim() });
           break;
         case 'critic_started':
           send(ws, { text: '**[3/5] Critic**' });
           break;
         case 'critic_done': {
           const lines = e.verdicts.map((v) => {
-            const mark = v.verdict === 'ship' ? '✓' : v.verdict === 'weak' ? '!' : '✗';
-            return `  ${mark} ${v.scenario} — ${v.reason}`;
+            const mark = v.verdict === 'pass' ? '✓' : v.verdict === 'rework' ? '!' : '✗';
+            return `  ${mark} ${v.scenario}: ${v.reasons.join('; ')}`;
           }).join('\n');
           send(ws, { text: `${e.verdicts.length} verdicts · $${e.usd.toFixed(4)}\n${lines}` });
           break;
@@ -369,6 +523,15 @@ async function handleExplore(url: string, lang: 'ts' | 'js', model: string | und
           });
           break;
         }
+        case 'gate_injection':
+          send(ws, { text: `  [gate] timeout:15000ms injected on ${e.assertionType} in "${e.scenario}"` });
+          break;
+        case 'gate_broken':
+          send(ws, { text: `  [gate] BROKEN "${e.scenario}" after ${e.attempts} attempt(s): ${e.reason}` });
+          break;
+        case 'heal':
+          send(ws, { text: `  ↺ healed: ${e.from} re-resolved to ${e.to} (${e.intent})` });
+          break;
       }
     },
   });
@@ -382,11 +545,46 @@ async function handleExplore(url: string, lang: 'ts' | 'js', model: string | und
   }
   const report = result;
 
-  const specName = slugify(url);
-  const { specPath, scenarios } = transcribe({ report, outDir, name: specName });
+  // Empty-framework guard. If the run produced zero scenarios — typically
+  // because the Planner couldn't reach the page or the Explorer ran out of
+  // useful actions — DO NOT scaffold a placeholder framework. That's how we
+  // ended up writing "0 scenarios, 11 files" to disk and charging for an
+  // empty zip on a bad URL. Surface a clear error to the user instead.
+  if (!report.scenarios || report.scenarios.length === 0) {
+    const totalUsd = report.cost.usd + (report.cost.plannerUsd ?? 0) + (report.cost.criticUsd ?? 0);
+    try { if (fs.existsSync(outDir)) fs.rmSync(outDir, { recursive: true, force: true }); } catch { /* noop */ }
+    const gateBroken = report.gate?.broken ?? [];
+    let msg = `✗ Couldn't generate a framework — 0 scenarios came back from this run.\n\n`;
+    if (gateBroken.length > 0) {
+      msg += `Gate dropped ${gateBroken.length} scenario(s) before Reality-Check:\n`;
+      for (const b of gateBroken) {
+        msg += `  • "${b.scenario}" — ${b.reason} (after ${b.attempts} attempt(s))\n`;
+      }
+      msg += `\nFix the Explorer to avoid hard sleeps and fragile CSS selectors on animated elements.\n\n`;
+    } else {
+      msg += `Most common reason: the Planner couldn't reach \`${url}\` (page unreachable, ` +
+        `wrong protocol, behind auth). Confirm the URL loads in your own browser, ` +
+        `then try again.\n\n`;
+    }
+    msg += `Cost so far: $${totalUsd.toFixed(4)} (planner $${(report.cost.plannerUsd ?? 0).toFixed(4)}, ` +
+      `explorer $${report.cost.usd.toFixed(4)}, critic $${(report.cost.criticUsd ?? 0).toFixed(4)})`;
+    send(ws, { text: msg });
+    return;
+  }
+
+  // v3: emit the full framework (not a single spec) + ship as a zip the UI
+  // can download. scaffold() calls pom.ts internally for the pages/tests/a11y
+  // tree and adds package.json, configs, README, .gitignore, fixtures, helpers.
+  const scaffoldResult = scaffold({
+    report,
+    outDir,
+    siteName: hostnameOf(url),
+    features,
+  });
+  const scenarios = scaffoldResult.pomResult.scenarios;
   const totalUsd = report.cost.usd + (report.cost.plannerUsd ?? 0) + (report.cost.criticUsd ?? 0);
 
-  // Summary message.
+  // Summary message (unchanged shape — just refers to the framework dir now).
   let replayLine = '';
   if (report.replay && !report.replay.skipped) {
     const total = report.replay.passed + report.replay.failed;
@@ -396,22 +594,102 @@ async function handleExplore(url: string, lang: 'ts' | 'js', model: string | und
   let stabilityLine = '';
   if (report.stability && !report.stability.skipped) {
     const flakePct = (report.stability.flakeRate * 100).toFixed(1);
-    stabilityLine = `\nStability: ${report.stability.passed} stable · ${report.stability.flaky ?? 0} flaky · ${report.stability.broken ?? 0} broken across ${report.stability.iterations}× re-runs · flake_rate ${flakePct}%`;
+    const recovered = report.reconciliation?.recovered ?? report.stability.recovered ?? 0;
+    const recoveredChip = recovered > 0 ? ` · **${recovered} recovered by Stabilizer**` : '';
+    const stabilizerCost = report.stability.stabilizerCostUsd ?? 0;
+    const stabilizerCostChip = stabilizerCost > 0 ? ` · stabilizer $${stabilizerCost.toFixed(4)}` : '';
+    // Strict stable (excludes recovered) when reconciliation is present.
+    const strictStable = report.reconciliation ? report.reconciliation.stable : report.stability.passed;
+    const flakyCount = report.reconciliation?.flaky ?? report.stability.flaky ?? 0;
+    const brokenCount = report.reconciliation?.broken ?? report.stability.broken ?? 0;
+    stabilityLine =
+      `\nStability: ${strictStable} stable${recoveredChip} · ${flakyCount} flaky · ` +
+      `${brokenCount} broken across ${report.stability.iterations}× re-runs · flake_rate ${flakePct}%` +
+      stabilizerCostChip;
   }
+  const reconciliationLine = report.reconciliation
+    ? '\n\n' + renderReconciliation(report.reconciliation).join('\n')
+    : '';
   send(ws, {
     text:
-      `**Done.** Wrote \`${path.relative(process.cwd(), specPath)}\` (${scenarios} scenarios).\n` +
+      `**Done.** Wrote framework to \`${path.relative(process.cwd(), outDir)}\` (${scenarios} scenarios, ${scaffoldResult.fileCount} files).\n` +
       `Cost: $${totalUsd.toFixed(4)} total ` +
       `(planner $${(report.cost.plannerUsd ?? 0).toFixed(4)}, explorer $${report.cost.usd.toFixed(4)}, critic $${(report.cost.criticUsd ?? 0).toFixed(4)})\n` +
       `Cascade: ${JSON.stringify(report.cascadeStats)}` +
       replayLine +
       stabilityLine +
+      reconciliationLine +
       (report.review?.summary ? `\n\n**Critic summary:** ${report.review.summary}` : ''),
   });
 
-  // The UI auto-detects test code patterns and renders the message as a copy/save-able block.
-  // Send the spec content as its own message so it lands in the right shape.
-  send(ws, { text: fs.readFileSync(specPath, 'utf8') });
+  // Zip the framework dir and ship to the UI via a structured message.
+  // The UI's handleAgentMessage dispatches on `type` and renders a download
+  // button when it sees `framework_zip`. Base64 payload is fine for typical
+  // framework sizes (~10-50 KB raw, ~14-67 KB after base64).
+  //
+  // After zipping succeeds, we slim the on-disk directory to JUST
+  // run-report.json. The zip is the deliverable; the directory becomes a
+  // tombstone so the dashboard's listRunsFromDisk scan still recognises
+  // this run. The zip itself is written alongside (not the gateway's job
+  // historically — but now we write it so the user has a portable copy on
+  // disk too, matching the CLI behaviour).
+  try {
+    const zipBuf = zipFrameworkToBuffer(outDir);
+    const filename = `${frameworkSlug}.zip`;
+    const sidecarZipPath = path.join(path.dirname(outDir), filename);
+
+    send(ws, {
+      type: 'framework_zip',
+      filename,
+      base64: zipBuf.toString('base64'),
+      sizeBytes: zipBuf.length,
+      fileCount: scaffoldResult.fileCount,
+      scenarios,
+      runReportPath: path.relative(process.cwd(), path.join(outDir, 'run-report.json')),
+    } as object);
+
+    // Persist a sidecar copy of the zip so users who skip the UI download
+    // (e.g., running headless or via API) still get a portable artifact.
+    fs.writeFileSync(sidecarZipPath, zipBuf);
+
+    // Slim the directory: keep only run-report.json on disk. Everything
+    // else (pages/, tests/, package.json, etc.) only lives in the zip from
+    // here on. Reduces disk footprint and avoids two-paths-of-truth confusion.
+    slimFrameworkDir(outDir);
+  } catch (err) {
+    // Don't fail the whole run if zip failed — framework is still on disk.
+    send(ws, { text: `Could not zip framework (\`${(err as Error).message}\`). The framework directory is still at \`${path.relative(process.cwd(), outDir)}\` — use it from there.` });
+  }
+}
+
+/** Hostname of a URL, falling back to the raw URL if parsing fails. Used for siteName in scaffold. */
+function hostnameOf(url: string): string {
+  try { return new URL(url).hostname; } catch { return url; }
+}
+
+/**
+ * After the zip is produced, replace the on-disk framework directory with a
+ * stub that contains only `run-report.json`. The zip is the canonical
+ * deliverable; the directory remains as a tombstone so the dashboard's
+ * `listRunsFromDisk` walk continues to find this run and surface its metadata
+ * (cost, scenarios, replay/stability stats). All bulky generated files
+ * (`pages/`, `tests/`, `a11y/`, `node_modules/`, etc.) are removed.
+ *
+ * Safe-rewrite pattern: read the report contents, blow the directory away,
+ * re-create the directory, write the report back. Idempotent and robust
+ * to the report file being absent (rare — only if scaffold failed earlier).
+ */
+function slimFrameworkDir(dir: string): void {
+  const reportPath = path.join(dir, 'run-report.json');
+  let reportContent: string | null = null;
+  if (fs.existsSync(reportPath)) {
+    try { reportContent = fs.readFileSync(reportPath, 'utf8'); } catch { /* leave null */ }
+  }
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  if (reportContent !== null) {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(reportPath, reportContent);
+  }
 }
 
 /* ─────────────────── /generate ─────────────────── */
@@ -444,34 +722,34 @@ async function handleHeal(specArg: string, model: string | undefined, ws: WebSoc
   send(ws, { text: `▸ Healing ${path.relative(process.cwd(), specPath)}` });
 
   const result = await heal({
-    specPath, model,
+    specPath,
     onEvent: (e) => {
       switch (e.type) {
-        case 'running_spec':
-          send(ws, { text: 'Running spec to find failures…' });
+        case 'scanned':
+          send(ws, { text: `Scanned ${e.total} locator(s) across ${e.files} file(s)` });
           break;
-        case 'failures_found':
-          send(ws, { text: `${e.count} selector-style failure(s) detected` });
+        case 'opened_page':
+          send(ws, { text: `Opened ${e.url}` });
           break;
         case 'healing':
-          send(ws, { text: `→ healing \`${e.selector}\`` });
+          send(ws, { text: `→ broken \`${e.selector}\`` });
           break;
         case 'healed':
-          send(ws, { text: `✓ \`${e.old}\`\n    → \`${e.new}\` (level=${e.level}, confidence=${e.confidence.toFixed(2)})` });
+          send(ws, { text: `✓ healed → \`${e.new}\` (level=${e.level})` });
           break;
         case 'unhealed':
-          send(ws, { text: `✗ \`${e.selector}\` — ${e.reason}` });
+          send(ws, { text: `✗ unhealable \`${e.selector}\` — ${e.reason}` });
           break;
       }
     },
   });
 
-  if (!result.healedPath) {
-    send(ws, { text: '**Done.** Nothing to heal.' });
-    return;
+  send(ws, {
+    text: `**Done.** ${result.intact} intact · ${result.healed.length} healed · ${result.unhealable.length} unhealable (of ${result.scanned}).`,
+  });
+  if (result.healedPath) {
+    send(ws, { text: fs.readFileSync(result.healedPath, 'utf8') });
   }
-  send(ws, { text: `**Done.** ${result.healed}/${result.total} healed → \`${path.relative(process.cwd(), result.healedPath)}\`` });
-  send(ws, { text: fs.readFileSync(result.healedPath, 'utf8') });
 }
 
 /* ─────────────────── /eval ─────────────────── */

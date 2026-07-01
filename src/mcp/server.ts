@@ -175,12 +175,12 @@ server.tool(
 
 server.tool(
   'qa_heal',
-  'Re-resolve broken selectors in an existing Playwright spec. Runs the spec to find failures, opens the URL in a fresh browser, asks Claude for replacements, validates each (must resolve to exactly one element), then writes <spec>.healed.<ext> with the patched calls.',
+  'Re-resolve broken selectors in an existing Playwright spec. Opens the live page the spec targets, probes every locator, and re-resolves the broken ones with the same locator ladder the Explorer uses (semantic intent → a different stable locator, confirmed to be the same element). Writes the repaired files back and reports anything it could not heal. Deterministic — no model call.',
   {
     specPath: z.string().describe('Path to the spec file (relative to project root or absolute)'),
+    baseUrl: z.string().optional().describe('Target URL override when the spec has no absolute goto'),
   },
-  async ({ specPath }) => {
-    requireApiKey();
+  async ({ specPath, baseUrl }) => {
     const fullPath = path.isAbsolute(specPath) ? specPath : projectFile(specPath);
     if (!fs.existsSync(fullPath)) {
       return {
@@ -190,23 +190,24 @@ server.tool(
     }
     log('heal', fullPath);
 
-    const result = await heal({ specPath: fullPath });
+    const result = await heal({ specPath: fullPath, baseUrl });
 
-    if (!result.healedPath) {
+    if (result.healed.length === 0 && result.unhealable.length === 0) {
       return {
-        content: [{ type: 'text', text: `Nothing to heal — ${result.total} failure(s) detected, none repairable. Logic failures (wrong text, wrong URL) need a human.` }],
+        content: [{ type: 'text', text: `Nothing to heal — all ${result.scanned} locator(s) still resolve on the live page.` }],
       };
     }
 
-    const healedContent = fs.readFileSync(result.healedPath, 'utf8');
-    const summary = [
-      `✓ ${result.healed}/${result.total} selectors healed`,
-      `  Patched spec: ${path.relative(PROJECT_ROOT, result.healedPath)}`,
+    const lines = [
+      `${result.intact} intact · ${result.healed.length} healed · ${result.unhealable.length} unhealable (of ${result.scanned} scanned)`,
       '',
-      '--- Patched spec ---',
-      healedContent,
-    ].join('\n');
-    return { content: [{ type: 'text', text: summary }] };
+      ...result.healed.map((h) => `✓ ${path.relative(PROJECT_ROOT, h.file)}\n    was: ${h.old}\n    now: ${h.new}`),
+      ...result.unhealable.map((u) => `✗ ${path.relative(PROJECT_ROOT, u.file)}: ${u.selector}\n    ${u.reason}`),
+    ];
+    if (result.healedPath) {
+      lines.push('', '--- Patched spec ---', fs.readFileSync(result.healedPath, 'utf8'));
+    }
+    return { content: [{ type: 'text', text: lines.join('\n') }] };
   },
 );
 

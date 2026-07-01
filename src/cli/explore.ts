@@ -3,8 +3,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { explore, type ReviewPaused } from '../agent/runtime.js';
 import { transcribe } from '../agent/transcriber.js';
-import { transcribePOM } from '../agent/pom.js';
+import { scaffold, frameworkDirName, normalizeAndValidateUrl } from '../agent/scaffold.js';
+import { zipFrameworkToFile } from '../agent/zip-framework.js';
+import { parseCommaSeparated } from '../agent/parse-features.js';
 import { readCsv } from '../agent/csv.js';
+import { renderReconciliation } from '../agent/reconcile.js';
 import type { PlannedScenario } from '../agent/planner.js';
 
 /**
@@ -29,6 +32,24 @@ interface ParsedArgs {
   stability: boolean;
   /** Number of stability iterations per scenario. Default: 3. */
   stabilityIterations: number;
+  /**
+   * Run Stage 5b — the Stabilizer LLM that proposes a wait or selector swap
+   * when a scenario is flaky. Default: true. Set false to keep stability
+   * fully deterministic + offline (no Sonnet call on flake).
+   */
+  stabilize: boolean;
+  /**
+   * Max Stabilizer fix attempts per flaky scenario. Default: 3. Higher values
+   * give the LLM more tries to find a strategy that works (each attempt sees
+   * the history of what didn't); cap is for cost containment.
+   */
+  stabilizeAttempts: number;
+  /**
+   * Feature names from --features X,Y,Z. Currently surfaced in the README
+   * and the README's "Features covered" section. Planner steering by feature
+   * is a separate piece of work (deferred).
+   */
+  features: string[];
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -40,6 +61,9 @@ function parseArgs(argv: string[]): ParsedArgs {
     replay: true,
     stability: true,
     stabilityIterations: 3,
+    stabilize: true,
+    stabilizeAttempts: 3,
+    features: [],
   };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -61,12 +85,38 @@ function parseArgs(argv: string[]): ParsedArgs {
       }
       parsed.stabilityIterations = n;
     }
+    else if (a === '--no-stabilize') parsed.stabilize = false;
+    else if (a === '--stabilize') parsed.stabilize = true;
+    else if (a === '--stabilize-attempts') {
+      const n = Number(args[++i]);
+      if (!Number.isFinite(n) || n < 1 || !Number.isInteger(n)) {
+        console.error(`✗ --stabilize-attempts expects a positive integer (got "${args[i]}")`);
+        process.exit(1);
+      }
+      parsed.stabilizeAttempts = n;
+    }
+    else if (a === '--features') {
+      const v = args[++i];
+      if (!v) {
+        console.error('✗ --features expects a comma-separated value (e.g. --features login,cart,checkout)');
+        process.exit(1);
+      }
+      parsed.features = parseCommaSeparated(v);
+    }
     else if (a && !parsed.url) parsed.url = a;
   }
   if (!parsed.url && !parsed.fromPlan) {
     console.error('Usage:');
-    console.error('  npm run explore -- <url> [--lang ts|js] [--name foo] [--out dir] [--review] [--no-pom] [--no-replay] [--no-stability] [--stability N]');
-    console.error('  npm run explore -- --from-plan <plan.csv> [--lang ts|js] [--name foo] [--no-pom] [--no-replay] [--no-stability] [--stability N]');
+    console.error('  npm run explore -- <url> [--lang ts|js] [--name foo] [--out dir] [--review]');
+    console.error('                          [--features login,cart] [--no-pom] [--no-replay]');
+    console.error('                          [--no-stability] [--stability N] [--no-stabilize]');
+    console.error('                          [--stabilize-attempts N]');
+    console.error('  npm run explore -- --from-plan <plan.csv> [--lang ts|js] [--name foo] [--no-pom]');
+    console.error('                                            [--no-replay] [--no-stability] [--stability N]');
+    console.error('                                            [--no-stabilize] [--stabilize-attempts N]');
+    console.error('');
+    console.error('  --no-stabilize          Skip Stage 5b. Flaky scenarios always drop.');
+    console.error('  --stabilize-attempts N  Max Stabilizer fix attempts per flaky scenario (default 3).');
     process.exit(1);
   }
   return parsed;
@@ -139,9 +189,39 @@ async function main(): Promise<void> {
     console.log(`▸ Resuming from plan: ${path.relative(process.cwd(), args.fromPlan)}`);
     console.log(`  ${parsed.scenarios.length} approved scenarios for ${url}`);
   } else {
-    url = args.url!;
-    outDir = path.join(base, `${runId()}-${slug(url)}`);
+    // Validate the URL BEFORE doing anything else. Stops "--", "(ts)" and
+    // similar garbage from reaching the Planner, where they'd produce an
+    // empty framework + a real bill.
+    const urlCheck = normalizeAndValidateUrl(args.url!);
+    if (!urlCheck.ok) {
+      console.error(`✗ Couldn't run /explore: ${urlCheck.reason}.`);
+      console.error('  Try a full URL like: npm run explore -- https://www.saucedemo.com/');
+      process.exit(1);
+    }
+    if (urlCheck.normalized) {
+      console.log(`  Note: added https:// for you — using ${urlCheck.url}`);
+    }
+    url = urlCheck.url;
+    const baseName = args.name ?? slug(url);
+    // v3.1 naming for the scaffold path: <brand>-automation-framework/. Stable
+    // across re-runs (overwrites previous). The --name flag (if provided) takes
+    // precedence so power users can override. Inline mode (--no-pom) keeps the
+    // old timestamped naming so power users don't accidentally lose history.
+    const dirName = args.pom
+      ? (args.name ? `${baseName}-automation-framework` : frameworkDirName(url))
+      : `${runId()}-${baseName}`;
+    outDir = path.join(base, dirName);
+    // Wipe the framework dir before re-running so stale POM files (e.g. a
+    // page object from a previous run with different features) don't linger.
+    if (args.pom && fs.existsSync(outDir)) {
+      fs.rmSync(outDir, { recursive: true, force: true });
+    }
     console.log(`▸ Exploring ${url}`);
+    if (args.features.length > 0) {
+      console.log(`  features: ${args.features.join(', ')}`);
+    } else {
+      console.log(`  features: (none specified — Planner will infer from homepage)`);
+    }
     if (args.review) console.log('  mode: review (pause after Planner)');
   }
   console.log(`  language: ${args.lang}`);
@@ -159,6 +239,9 @@ async function main(): Promise<void> {
     skipReplay: !args.replay,
     skipStability: !args.stability,
     stabilityIterations: args.stabilityIterations,
+    stabilize: args.stabilize,
+    maxStabilizeAttempts: args.stabilizeAttempts,
+    features: args.features,
     onEvent: (e) => {
       switch (e.type) {
         case 'plan_started':
@@ -185,8 +268,8 @@ async function main(): Promise<void> {
         case 'critic_done':
           console.log(`      ${e.verdicts.length} verdicts · $${e.usd.toFixed(4)}`);
           for (const v of e.verdicts) {
-            const mark = v.verdict === 'ship' ? '✓' : v.verdict === 'weak' ? '!' : '✗';
-            console.log(`        ${mark} ${v.scenario} — ${v.reason}`);
+            const mark = v.verdict === 'pass' ? '✓' : v.verdict === 'rework' ? '!' : '✗';
+            console.log(`        ${mark} ${v.scenario}: ${v.reasons.join('; ')}`);
           }
           break;
         case 'replay_started':
@@ -206,12 +289,29 @@ async function main(): Promise<void> {
           console.log(`      ✓ ${e.name}  iter ${e.iteration}  (${e.durationMs}ms)`); break;
         case 'stability_iteration_failed':
           console.log(`      ✗ ${e.name}  iter ${e.iteration} (step ${e.failedStep + 1} ${e.stepKind}: ${truncate(e.error, 120)})`); break;
-        case 'stability_done':
-          console.log(`      ${e.stable} stable · ${e.flaked} flaked · flake_rate=${(e.flakeRate * 100).toFixed(1)}% · ${(e.durationMs / 1000).toFixed(1)}s`); break;
+        case 'stability_done': {
+          const recovered = e.recovered ?? 0;
+          const recoveredChip = recovered > 0 ? ` · ${recovered} recovered by Stabilizer` : '';
+          const stabilizerCost = e.stabilizerCostUsd ?? 0;
+          const stabilizerCostChip = stabilizerCost > 0 ? ` · stabilizer $${stabilizerCost.toFixed(4)}` : '';
+          console.log(
+            `      ${e.stable} stable${recoveredChip} · ${e.flaked} flaked · flake_rate=${(e.flakeRate * 100).toFixed(1)}% · ` +
+            `${(e.durationMs / 1000).toFixed(1)}s${stabilizerCostChip}`,
+          );
+          break;
+        }
+        case 'gate_injection':
+          console.log(`      [gate] ${e.detail} in "${e.scenario}"`); break;
+        case 'gate_broken':
+          console.log(`      [gate] BROKEN "${e.scenario}" after ${e.attempts} attempt(s): ${e.reason}`); break;
+        case 'heal':
+          console.log(`      ↺ healed: ${e.from} re-resolved to ${e.to} (${e.intent})`); break;
         case 'review_paused':
           console.log(`\n■ Paused for review.`); break;
         case 'done':
-          console.log(`\n✓ ${e.scenarios} scenario(s) emitted`); break;
+          // This is the Explorer's count. The final emitted (generated) count
+          // and the planned = generated + dropped reconciliation print below.
+          console.log(`\n✓ ${e.scenarios} scenario(s) explored`); break;
       }
     },
   });
@@ -229,17 +329,73 @@ async function main(): Promise<void> {
     return;
   }
 
+  // Empty-framework guard. If 0 scenarios came back (Planner couldn't reach
+  // the page, Explorer ran out of useful actions, etc.), don't scaffold a
+  // placeholder framework — that's how we ended up writing "0 scenarios, 11
+  // files" to disk on a bad URL. Bail with a clear message.
+  if (!result.scenarios || result.scenarios.length === 0) {
+    const totalUsd = result.cost.usd + (result.cost.plannerUsd ?? 0) + (result.cost.criticUsd ?? 0);
+    try { if (fs.existsSync(outDir)) fs.rmSync(outDir, { recursive: true, force: true }); } catch { /* noop */ }
+    console.error('');
+    console.error('✗ No framework was written — 0 scenarios produced.');
+    const gateBroken = result.gate?.broken ?? [];
+    if (gateBroken.length > 0) {
+      console.error(`  Gate dropped ${gateBroken.length} scenario(s) before Reality-Check:`);
+      for (const b of gateBroken) {
+        console.error(`    • "${b.scenario}" — ${b.reason} (after ${b.attempts} attempt(s))`);
+      }
+      console.error('  Fix: avoid hard sleeps and fragile CSS selectors on animated elements.');
+    } else {
+      console.error(`  Most common cause: the Planner couldn't reach ${url} (page unreachable, wrong protocol, behind auth).`);
+      console.error(`  Confirm the URL loads in your own browser, then try again.`);
+    }
+    console.error(`  Cost so far: $${totalUsd.toFixed(4)}`);
+    process.exit(2);
+  }
+
   let primaryPath: string;
   let scenarios: number;
+  let frameworkZipPath: string | undefined;
   if (args.pom) {
-    const pom = transcribePOM({ report: result, outDir, name: specName });
-    primaryPath = pom.specFile;
-    scenarios = pom.scenarios;
-    console.log(`\nWrote POM framework under ${path.relative(process.cwd(), pom.rootDir)}/`);
-    console.log(`  pages/        ${pom.pageFiles.length} page object class(es)`);
-    console.log(`  tests/        ${path.basename(pom.specFile)}`);
-    console.log(`  a11y/         ${path.basename(pom.a11yFile)}`);
-    console.log(`  scenarios:    ${scenarios}`);
+    // v3: scaffold emits the full project (package.json, configs, README, etc.)
+    // and calls pom.ts internally for pages/tests/a11y. Then we zip it.
+    const scaffoldResult = scaffold({
+      report: result,
+      outDir,
+      siteName: hostnameOf(url),
+      features: args.features,
+    });
+    primaryPath = scaffoldResult.pomResult.specFile;
+    scenarios = scaffoldResult.pomResult.scenarios;
+    const features = scaffoldResult.pomResult.features;
+    const specCount = scaffoldResult.pomResult.specFiles.length;
+    console.log(`\nWrote complete framework to ${path.relative(process.cwd(), outDir)}/`);
+    console.log(`  pages/        ${scaffoldResult.pomResult.pageFiles.length} page object class(es) (one per feature + BasePage)`);
+    if (features.length > 0) {
+      console.log(`  tests/        ${specCount} spec file(s) across feature folder(s): ${features.map((f) => `tests/${f}/`).join(', ')}`);
+    } else {
+      console.log(`  tests/        ${specCount} spec file(s)`);
+    }
+    console.log(`                ${scenarios} scenarios total`);
+    console.log(`  tests/a11y/   ${path.basename(scaffoldResult.pomResult.a11yFile)}`);
+    console.log(`  scaffold:     package.json, playwright.config.ts, tsconfig.json, README.md, .gitignore, .env.example`);
+    console.log(`  fixtures:     credentials.ts`);
+    console.log(`  helpers:      assertions.ts`);
+    // Zip the framework alongside the directory for easy distribution.
+    // After the zip is in place, slim the directory to just run-report.json
+    // so the on-disk footprint is the zip (the deliverable) plus a tiny
+    // tombstone that keeps the dashboard's run-history scan working.
+    try {
+      const zipPath = `${outDir}.zip`;
+      const { sizeBytes } = zipFrameworkToFile(outDir, zipPath);
+      frameworkZipPath = zipPath;
+      console.log(`  zip:          ${path.relative(process.cwd(), zipPath)} (${(sizeBytes / 1024).toFixed(1)} KB)`);
+      // Slim the dir — keep only run-report.json on disk.
+      slimFrameworkDir(outDir);
+      console.log(`  (framework files live in the zip; only run-report.json remains on disk)`);
+    } catch (err) {
+      console.log(`  zip:          skipped — ${(err as Error).message}`);
+    }
   } else {
     const r = transcribe({ report: result, outDir, name: specName });
     primaryPath = r.specPath;
@@ -266,11 +422,56 @@ async function main(): Promise<void> {
   if (result.stability && !result.stability.skipped) {
     const total = result.stability.passed + result.stability.flaked;
     const pct = (result.stability.flakeRate * 100).toFixed(1);
-    console.log(`Stability:     ${result.stability.passed}/${total} stable across ${result.stability.iterations}× · flake_rate=${pct}% · ${(result.stability.durationMs / 1000).toFixed(1)}s`);
+    // Headline uses strict stable (excludes recovered) when reconciliation is
+    // present, so a relaxed-rule survivor is never counted as a clean pass.
+    const strictStable = result.reconciliation ? result.reconciliation.stable : result.stability.passed;
+    const recovered = result.reconciliation?.recovered ?? result.stability.recovered ?? 0;
+    const recoveredNote = recovered > 0 ? ` (+${recovered} recovered)` : '';
+    console.log(`Stability:     ${strictStable}/${total} stable across ${result.stability.iterations}×${recoveredNote} · flake_rate=${pct}% · ${(result.stability.durationMs / 1000).toFixed(1)}s`);
   } else if (result.stability?.skipped) {
     console.log('Stability:     skipped (--no-stability)');
   }
-  console.log('\nRun: npx playwright test ' + path.relative(process.cwd(), primaryPath));
+  if (result.reconciliation) {
+    console.log('');
+    for (const line of renderReconciliation(result.reconciliation)) console.log(line);
+  }
+  // v3: the new framework workflow is "cd into it and use it as a project".
+  // For backward compat with --no-pom, still show the single-file command.
+  if (args.pom) {
+    console.log('\nRun the framework:');
+    console.log('  cd ' + path.relative(process.cwd(), outDir));
+    console.log('  npm install');
+    console.log('  npx playwright test');
+    if (frameworkZipPath) {
+      console.log(`\nOr share the zip: ${path.relative(process.cwd(), frameworkZipPath)}`);
+    }
+  } else {
+    console.log('\nRun: npx playwright test ' + path.relative(process.cwd(), primaryPath));
+  }
+}
+
+/** Hostname of a URL, falling back to the raw URL if parsing fails. */
+function hostnameOf(url: string): string {
+  try { return new URL(url).hostname; } catch { return url; }
+}
+
+/**
+ * After the zip is written, replace the on-disk framework directory with a
+ * stub that contains only `run-report.json`. The zip is the deliverable;
+ * the dir stays as a tombstone so the dashboard's run-history scan still
+ * recognises this run.
+ */
+function slimFrameworkDir(dir: string): void {
+  const reportPath = path.join(dir, 'run-report.json');
+  let reportContent: string | null = null;
+  if (fs.existsSync(reportPath)) {
+    try { reportContent = fs.readFileSync(reportPath, 'utf8'); } catch { /* leave null */ }
+  }
+  try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
+  if (reportContent !== null) {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(reportPath, reportContent);
+  }
 }
 
 function isPaused(r: { paused?: boolean }): r is ReviewPaused {

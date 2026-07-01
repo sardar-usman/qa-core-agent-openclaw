@@ -1,397 +1,507 @@
-import { execSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { chromium, type Browser, type Page } from 'playwright';
-import Anthropic from '@anthropic-ai/sdk';
-import { resolve as resolveSelector, type CascadeLevel } from './selectors.js';
+import { chromium, type Browser, type Page, type FrameLocator } from 'playwright';
+import { emitLocatorCall, type CascadeLevel, type Scope } from './selectors.js';
+import { healResolve } from './tools.js';
 import { installEvalShim } from './eval-shim.js';
 
 /**
- * Self-healing selectors.
+ * Standalone selector healing for an existing Playwright spec.
  *
- * Workflow:
+ * Given a spec whose selectors no longer match the live page, this:
  *
- *   1. Run the target spec with the Playwright JSON reporter.
- *   2. For each failed test whose error message looks like a selector miss
- *      (element-not-found, timeout, count assertion failure), grab the
- *      assertion's URL and the original selector call from the spec.
- *   3. Open the URL in a fresh browser, ask Claude (Sonnet by default) for
- *      a replacement intent + level + arg the cascade can resolve.
- *   4. Verify the new selector resolves to exactly one element.
- *   5. Rewrite the spec in place to <spec>.healed.<ext> with the new calls,
- *      annotating each heal with the confidence and the original call.
+ *   1. Loads the spec and, if it uses POM, the page-object files it imports
+ *      (the locators live there, not in the spec).
+ *   2. Opens the live page the spec targets (from a page.goto or the page
+ *      object's `url`, or an explicit --base-url).
+ *   3. Probes every locator against the live page. One that still resolves is
+ *      left untouched.
+ *   4. A locator that no longer resolves is re-resolved with the SAME locator
+ *      ladder and healResolve logic the Explorer uses (semantic intent, a
+ *      different stable locator), NOT an LLM guess.
+ *   5. Confirms the re-resolved element is the SAME intended element (its
+ *      accessible name / text / label still matches the original intent). A
+ *      heal to the wrong element is worse than no heal, so an unconfirmed or
+ *      ambiguous match is refused.
+ *   6. Writes the repaired files back and reports every heal and every locator
+ *      it could not heal. An unhealable selector is reported, never silently
+ *      left or wrongly changed.
  *
- * Only assertion-style failures are healed. Logic failures (wrong text, wrong
- * URL) are left alone — they need a human.
+ * This is fully deterministic: no spec run, no model call. It reuses
+ * `healResolve` and the cascade from selectors.ts, and `emitLocatorCall` to
+ * write the new locator, so there is one locator ladder in the codebase.
  */
 
 export interface HealOptions {
   specPath: string;
-  model?: string;
+  /** Target URL override. When absent, taken from a goto / page-object url in the spec. */
   baseUrl?: string;
-  /** Skip running Playwright — caller already has a JSON report. */
-  reportPath?: string;
+  /** Write repaired files to disk. Default true; false previews without writing. */
+  write?: boolean;
+  /** Accepted for back-compat with older callers; unused (healing is model-free). */
+  model?: string;
   onEvent?: (event: HealEvent) => void;
 }
 
 export type HealEvent =
-  | { type: 'running_spec' }
-  | { type: 'failures_found'; count: number }
-  | { type: 'healing'; selector: string; url: string }
-  | { type: 'healed'; old: string; new: string; level: CascadeLevel; confidence: number }
-  | { type: 'unhealed'; reason: string; selector: string }
-  | { type: 'done'; healedPath: string | null; healed: number; total: number };
+  | { type: 'scanned'; total: number; files: number }
+  | { type: 'opened_page'; url: string }
+  | { type: 'intact'; selector: string }
+  | { type: 'healing'; selector: string }
+  | { type: 'healed'; old: string; new: string; level: CascadeLevel; file: string }
+  | { type: 'unhealed'; selector: string; reason: string; file: string }
+  | { type: 'done'; healed: number; unhealed: number; intact: number; total: number; files: string[] };
+
+export interface HealDetail { file: string; old: string; new: string; level: CascadeLevel }
+export interface UnhealDetail { file: string; selector: string; reason: string }
 
 export interface HealResult {
+  /** The spec path when it (or a POM file) was written; null when nothing changed. */
   healedPath: string | null;
-  healed: number;
+  filesWritten: string[];
+  scanned: number;
+  intact: number;
+  healed: HealDetail[];
+  unhealable: UnhealDetail[];
+  /** Total locators scanned. Kept for back-compat with `${healed}/${total}` callers. */
   total: number;
 }
 
-interface SelectorCall {
-  raw: string;            // e.g. page.getByRole("button", { name: "Sign in" })
+/* ─────────────────────────── parsing ─────────────────────────── */
+
+const LOCATOR_METHODS = [
+  'getByRole', 'getByLabel', 'getByPlaceholder', 'getByText',
+  'getByAltText', 'getByTitle', 'getByTestId', 'locator',
+] as const;
+type LocatorMethod = (typeof LOCATOR_METHODS)[number];
+
+interface LocatorArgs {
+  role?: string; name?: string; exact?: boolean;
+  label?: string; placeholder?: string; text?: string;
+  alt?: string; title?: string; testid?: string;
+  css?: string; xpath?: string;
+}
+
+interface LocatorCall {
+  file: string;
+  line: number;      // 1-indexed
+  startCol: number;  // 0-indexed within the line
+  endCol: number;    // exclusive
+  raw: string;       // the `page...getByX(...)` text, no trailing .first()/.click()
+  root: string;      // 'page' or 'this.page'
+  method: LocatorMethod;
   level: CascadeLevel;
-  arg: unknown;           // role+name object, or label string, etc.
-  /** 1-indexed line in the spec where this call appears. */
-  line: number;
-  /** Column offset of the call within that line. */
-  col: number;
+  frameChain: string[];
+  args: LocatorArgs;
 }
 
-interface FailureContext {
-  testTitle: string;
-  url: string;
-  /** The error message Playwright produced. */
-  error: string;
-  /** Heuristically extracted selector call from the error stack. */
-  selectorRaw?: string;
-}
-
-const SELECTOR_REGEXES = [
-  /page\.getByRole\(([^)]+)\)/g,
-  /page\.getByLabel\(([^)]+)\)/g,
-  /page\.getByTestId\(([^)]+)\)/g,
-  /page\.locator\(([^)]+)\)/g,
-];
-
-export async function heal(opts: HealOptions): Promise<HealResult> {
-  const specPath = path.resolve(opts.specPath);
-  if (!fs.existsSync(specPath)) throw new Error(`Spec not found: ${specPath}`);
-
-  opts.onEvent?.({ type: 'running_spec' });
-  const failures = opts.reportPath
-    ? parseReport(opts.reportPath)
-    : runAndParse(specPath, opts.baseUrl);
-
-  opts.onEvent?.({ type: 'failures_found', count: failures.length });
-  if (failures.length === 0) {
-    return { healedPath: null, healed: 0, total: 0 };
-  }
-
-  // Extract every selector call in the spec, with line numbers.
-  const specSrc = fs.readFileSync(specPath, 'utf8');
-  const calls = extractSelectorCalls(specSrc);
-
-  // For each failure, find the matching selector call and try to heal it.
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error('ANTHROPIC_API_KEY is not set.');
-  const model = opts.model ?? process.env.QA_CORE_MODEL_HEAL ?? 'claude-sonnet-4-6';
-  const client = new Anthropic({ apiKey });
-
-  let browser: Browser | undefined;
-  const edits: Array<{ line: number; col: number; oldRaw: string; newRaw: string }> = [];
-  try {
-    browser = await chromium.launch({ headless: true });
-
-    for (const failure of failures) {
-      const call = matchFailureToCall(failure, calls);
-      if (!call) {
-        opts.onEvent?.({ type: 'unhealed', reason: 'no matching selector call in spec', selector: failure.selectorRaw ?? '' });
-        continue;
-      }
-
-      opts.onEvent?.({ type: 'healing', selector: call.raw, url: failure.url });
-
-      // Open fresh page, ask Claude for a replacement, verify it resolves.
-      const ctx = await browser.newContext();
-      await installEvalShim(ctx);
-      const page = await ctx.newPage();
-      try {
-        await page.goto(failure.url, { waitUntil: 'load' });
-        const proposal = await proposeNewSelector(client, model, {
-          page, failure, oldCall: call,
-        });
-        if (!proposal) {
-          opts.onEvent?.({ type: 'unhealed', reason: 'model declined to propose', selector: call.raw });
-          continue;
-        }
-
-        // Validate: try to resolve, must hit exactly one element.
-        const resolved = await resolveSelector(page, {
-          intent: proposal.intent, role: proposal.role, label: proposal.label,
-          testid: proposal.testid, css: proposal.css,
-        });
-        if (!resolved) {
-          opts.onEvent?.({ type: 'unhealed', reason: 'proposal did not resolve on live page', selector: call.raw });
-          continue;
-        }
-
-        const newRaw = emitPlaywrightCall(resolved.level, resolved.arg);
-        edits.push({ line: call.line, col: call.col, oldRaw: call.raw, newRaw });
-        opts.onEvent?.({ type: 'healed', old: call.raw, new: newRaw, level: resolved.level, confidence: proposal.confidence });
-      } finally {
-        await ctx.close();
-      }
+/** Read a JS string literal starting at s[i] (a quote). Returns its value and end index. */
+function readString(s: string, i: number): { value: string; end: number } | null {
+  const quote = s[i];
+  if (quote !== '"' && quote !== "'" && quote !== '`') return null;
+  let out = '';
+  let j = i + 1;
+  while (j < s.length) {
+    const c = s[j];
+    if (c === '\\') {
+      const n = s[j + 1];
+      out += n === 'n' ? '\n' : n === 't' ? '\t' : n === 'r' ? '\r' : (n ?? '');
+      j += 2;
+      continue;
     }
-  } finally {
-    await browser?.close();
+    if (c === quote) return { value: out, end: j + 1 };
+    out += c;
+    j++;
   }
-
-  if (edits.length === 0) {
-    opts.onEvent?.({ type: 'done', healedPath: null, healed: 0, total: failures.length });
-    return { healedPath: null, healed: 0, total: failures.length };
-  }
-
-  const healedPath = writeHealedSpec(specPath, specSrc, edits);
-  opts.onEvent?.({ type: 'done', healedPath, healed: edits.length, total: failures.length });
-  return { healedPath, healed: edits.length, total: failures.length };
+  return null;
 }
 
-/* ───── Playwright invocation ───── */
-
-function runAndParse(specPath: string, baseUrl: string | undefined): FailureContext[] {
-  const reportPath = path.join(path.dirname(specPath), '.heal-report.json');
-  try {
-    execSync(
-      `npx playwright test "${specPath}" --reporter=json --project=chromium`,
-      {
-        cwd: process.cwd(),
-        env: {
-          ...process.env,
-          ...(baseUrl ? { QA_CORE_BASE_URL: baseUrl } : {}),
-          PLAYWRIGHT_JSON_OUTPUT_NAME: reportPath,
-        },
-        stdio: ['ignore', 'pipe', 'pipe'],
-      },
-    );
-  } catch {
-    // Playwright exits non-zero when tests fail — expected.
-  }
-  return parseReport(reportPath);
-}
-
-function parseReport(reportPath: string): FailureContext[] {
-  if (!fs.existsSync(reportPath)) return [];
-  let data: unknown;
-  try { data = JSON.parse(fs.readFileSync(reportPath, 'utf8')); } catch { return []; }
-  const failures: FailureContext[] = [];
-  const suites = (data as { suites?: unknown[] }).suites ?? [];
-  walkSuites(suites, failures);
-  return failures.filter(isSelectorMiss);
-}
-
-function walkSuites(suites: unknown[], out: FailureContext[]): void {
-  for (const s of suites) {
-    const suite = s as { specs?: unknown[]; suites?: unknown[] };
-    if (suite.specs) {
-      for (const spec of suite.specs) {
-        const sp = spec as { title: string; tests?: unknown[] };
-        for (const t of sp.tests ?? []) {
-          const test = t as { results?: unknown[] };
-          for (const r of test.results ?? []) {
-            const result = r as { status?: string; error?: { message?: string; stack?: string }; errors?: Array<{ message?: string }> };
-            if (result.status === 'failed' || result.status === 'timedOut') {
-              const errMsg = result.error?.message ?? result.errors?.[0]?.message ?? '';
-              const stack = result.error?.stack ?? '';
-              out.push({
-                testTitle: sp.title,
-                url: extractUrlFromStack(stack) ?? '',
-                error: errMsg,
-                selectorRaw: extractSelectorFromError(errMsg + '\n' + stack),
-              });
-            }
-          }
-        }
-      }
+/** Index of the ')' matching the '(' at `open`, skipping string literals. -1 if unbalanced. */
+function matchParen(s: string, open: number): number {
+  let depth = 0;
+  for (let j = open; j < s.length; j++) {
+    const c = s[j];
+    if (c === '"' || c === "'" || c === '`') {
+      const r = readString(s, j);
+      if (!r) return -1;
+      j = r.end - 1;
+      continue;
     }
-    if (suite.suites) walkSuites(suite.suites, out);
+    if (c === '(') depth++;
+    else if (c === ')') { depth--; if (depth === 0) return j; }
+  }
+  return -1;
+}
+
+/** First string literal anywhere in a fragment. */
+function firstString(s: string): string | null {
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === '"' || s[i] === "'" || s[i] === '`') {
+      const r = readString(s, i);
+      if (r) return r.value;
+    }
+  }
+  return null;
+}
+
+/** Value of a `<key>: "..."` string option, with or without a quoted key (JSON emits `"name":`). */
+function namedString(s: string, key: string): string | null {
+  const m = s.match(new RegExp(`["']?\\b${key}\\b["']?\\s*:\\s*`));
+  if (!m || m.index == null) return null;
+  const at = m.index + m[0].length;
+  const r = readString(s, at);
+  return r ? r.value : null;
+}
+
+function levelOf(method: LocatorMethod, args: LocatorArgs): CascadeLevel {
+  switch (method) {
+    case 'getByRole': return 'role';
+    case 'getByLabel': return 'label';
+    case 'getByPlaceholder': return 'placeholder';
+    case 'getByText': return 'text';
+    case 'getByAltText': return 'alt';
+    case 'getByTitle': return 'title';
+    case 'getByTestId': return 'testid';
+    case 'locator': return args.xpath ? 'xpath' : 'css';
   }
 }
 
-function isSelectorMiss(f: FailureContext): boolean {
-  const e = f.error.toLowerCase();
-  return e.includes('locator') || e.includes('not found') || e.includes('timeout') ||
-         e.includes('expected to be visible') || e.includes('expected count');
+function parseArgs(method: LocatorMethod, argsRaw: string): LocatorArgs {
+  const first = firstString(argsRaw);
+  switch (method) {
+    case 'getByRole':
+      return { role: first ?? '', name: namedString(argsRaw, 'name') ?? undefined, exact: /["']?\bexact\b["']?\s*:\s*true\b/.test(argsRaw) };
+    case 'getByLabel': return { label: first ?? '' };
+    case 'getByPlaceholder': return { placeholder: first ?? '' };
+    case 'getByText': return { text: first ?? '' };
+    case 'getByAltText': return { alt: first ?? '' };
+    case 'getByTitle': return { title: first ?? '' };
+    case 'getByTestId': return { testid: first ?? '' };
+    case 'locator': {
+      const s = first ?? '';
+      if (s.startsWith('xpath=')) return { xpath: s.slice('xpath='.length) };
+      if (s.startsWith('//') || s.startsWith('./') || s.startsWith('(//')) return { xpath: s };
+      return { css: s };
+    }
+  }
 }
 
-function extractUrlFromStack(stack: string): string | null {
-  const m = stack.match(/page\.goto\(['"`](https?:\/\/[^'"`]+)['"`]/);
-  return m && m[1] ? m[1] : null;
-}
-
-function extractSelectorFromError(text: string): string | undefined {
-  const m = text.match(/(page\.(?:getByRole|getByLabel|getByTestId|locator)\([^)]+\))/);
-  return m ? m[1] : undefined;
-}
-
-/* ───── Spec parsing ───── */
-
-function extractSelectorCalls(src: string): SelectorCall[] {
-  const calls: SelectorCall[] = [];
+/** Extract every locator chain in a file: page[.frameLocator(...)].getByX(...) / .locator(...). */
+function parseLocatorCalls(src: string, file: string): LocatorCall[] {
+  const calls: LocatorCall[] = [];
   const lines = src.split('\n');
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line) continue;
-    for (const re of SELECTOR_REGEXES) {
-      re.lastIndex = 0;
-      let m: RegExpExecArray | null;
-      while ((m = re.exec(line)) !== null) {
-        const raw = m[0];
-        const args = m[1] ?? '';
-        const level: CascadeLevel = raw.includes('getByRole')   ? 'role'
-                                  : raw.includes('getByLabel')  ? 'label'
-                                  : raw.includes('getByTestId') ? 'testid'
-                                  :                                'css';
-        calls.push({ raw, level, arg: args, line: i + 1, col: m.index });
+  const rootRe = /(?<![\w.$])(this\.page|page)\b/g;
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li]!;
+    let rm: RegExpExecArray | null;
+    rootRe.lastIndex = 0;
+    while ((rm = rootRe.exec(line)) !== null) {
+      const root = rm[1]!;
+      let pos = rm.index + root.length;
+      const frameChain: string[] = [];
+      let matched: LocatorMethod | null = null;
+      let open = -1;
+      // Consume any .frameLocator("...") prefixes, then the terminal locator method.
+      for (;;) {
+        if (line.startsWith('.frameLocator(', pos)) {
+          const fo = pos + '.frameLocator'.length;
+          const fc = matchParen(line, fo);
+          if (fc < 0) break;
+          const inner = firstString(line.slice(fo + 1, fc));
+          if (inner != null) frameChain.push(inner);
+          pos = fc + 1;
+          continue;
+        }
+        for (const m of LOCATOR_METHODS) {
+          if (line.startsWith('.' + m + '(', pos)) { matched = m; open = pos + 1 + m.length; break; }
+        }
+        break;
       }
+      if (!matched || open < 0) continue;
+      const close = matchParen(line, open);
+      if (close < 0) continue;
+      const argsRaw = line.slice(open + 1, close);
+      const args = parseArgs(matched, argsRaw);
+      calls.push({
+        file, line: li + 1, startCol: rm.index, endCol: close + 1,
+        raw: line.slice(rm.index, close + 1), root, method: matched,
+        level: levelOf(matched, args), frameChain, args,
+      });
     }
   }
   return calls;
 }
 
-function matchFailureToCall(f: FailureContext, calls: SelectorCall[]): SelectorCall | null {
-  if (!f.selectorRaw) return null;
-  return calls.find((c) => c.raw === f.selectorRaw) ?? null;
-}
+/* ─────────────────────── file + url discovery ─────────────────────── */
 
-/* ───── Proposal call ───── */
+interface SourceFile { path: string; src: string }
 
-interface HealProposal {
-  intent: string;
-  role?: string;
-  label?: string;
-  testid?: string;
-  css?: string;
-  /** Model's confidence 0..1. */
-  confidence: number;
-}
-
-const PROPOSER_SYSTEM = `You are a selector healer. A Playwright test selector stopped working because the page changed. You will be given:
-  - The original failing selector call.
-  - A snapshot of the visible interactive elements on the live page.
-
-Your job: propose a replacement that matches the ORIGINAL INTENT. Prefer role+name; fall back to label; then testid; then CSS as last resort.
-
-Return strictly:
-
-<intent>short description of what the element is, e.g. "submit button"</intent>
-<role>aria role if applicable, otherwise empty</role>
-<label>visible label text if applicable, otherwise empty</label>
-<testid>data-testid if you see one, otherwise empty</testid>
-<css>CSS selector ONLY if nothing else fits, otherwise empty</css>
-<confidence>0.0 to 1.0</confidence>
-
-If no good replacement is visible, return <confidence>0.0</confidence> and leave the other tags empty.`;
-
-async function proposeNewSelector(
-  client: Anthropic,
-  model: string,
-  args: { page: Page; failure: FailureContext; oldCall: SelectorCall },
-): Promise<HealProposal | null> {
-  // Function declarations only — tsx injects `__name` wrappers for arrow
-  // funcs assigned to consts, which break when serialized to page.evaluate.
-  const snapshot = await args.page.evaluate(() => {
-    function pick(el: Element): Record<string, unknown> {
-      const r = el as HTMLElement;
-      const text = (r.getAttribute('aria-label') ?? r.getAttribute('placeholder') ?? r.getAttribute('name') ?? (r.textContent ?? '').trim().slice(0, 60)) || undefined;
-      return {
-        tag: r.tagName.toLowerCase(),
-        role: r.getAttribute('role') ?? undefined,
-        label: text,
-        testid: r.getAttribute('data-testid') ?? undefined,
-        type: (r as HTMLInputElement).type ?? undefined,
-      };
+/** The spec plus any relative-imported page-object files that exist on disk. */
+function gatherFiles(specPath: string, specSrc: string): SourceFile[] {
+  const files: SourceFile[] = [{ path: specPath, src: specSrc }];
+  const dir = path.dirname(specPath);
+  const seen = new Set([specPath]);
+  for (const m of specSrc.matchAll(/import\s+[^'"]*?from\s+['"]([^'"]+)['"]/g)) {
+    const spec = m[1]!;
+    if (!spec.startsWith('.')) continue; // package import, not a local page object
+    const resolved = resolveImport(dir, spec);
+    if (resolved && !seen.has(resolved)) {
+      seen.add(resolved);
+      files.push({ path: resolved, src: fs.readFileSync(resolved, 'utf8') });
     }
-    return {
-      inputs:  Array.from(document.querySelectorAll('input, textarea, select')).slice(0, 40).map(pick),
-      buttons: Array.from(document.querySelectorAll('button, [role="button"], [type="submit"]')).slice(0, 40).map(pick),
-      links:   Array.from(document.querySelectorAll('a[href]')).slice(0, 30).map(pick),
-    };
-  });
-
-  const response = await client.messages.create({
-    model,
-    max_tokens: 700,
-    system: [{ type: 'text', text: PROPOSER_SYSTEM, cache_control: { type: 'ephemeral' } } as Anthropic.TextBlockParam],
-    messages: [
-      {
-        role: 'user',
-        content: `Original failing call:\n  ${args.oldCall.raw}\n\nFailure message:\n  ${args.failure.error.slice(0, 400)}\n\nLive page elements:\n${JSON.stringify(snapshot, null, 2)}`,
-      },
-    ],
-  });
-
-  const text = response.content
-    .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-    .map((b) => b.text).join('\n');
-
-  const get = (tag: string): string => {
-    const m = text.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`, 'i'));
-    return m && m[1] ? m[1].trim() : '';
-  };
-
-  const confidence = parseFloat(get('confidence') || '0');
-  if (!isFinite(confidence) || confidence < 0.4) return null;
-  const intent = get('intent') || 'element';
-  return {
-    intent,
-    role:   get('role')   || undefined,
-    label:  get('label')  || undefined,
-    testid: get('testid') || undefined,
-    css:    get('css')    || undefined,
-    confidence,
-  };
+  }
+  return files;
 }
 
-/* ───── Emit + write ───── */
+/** Resolve a relative import to a real file, trying the common extensions. */
+function resolveImport(fromDir: string, spec: string): string | null {
+  const base = path.resolve(fromDir, spec);
+  const candidates = [
+    base, `${base}.ts`, `${base}.js`,
+    base.replace(/\.js$/, '.ts'), base.replace(/\.ts$/, '.js'),
+    path.join(base, 'index.ts'), path.join(base, 'index.js'),
+  ];
+  for (const c of candidates) {
+    try { if (fs.statSync(c).isFile()) return c; } catch { /* not this one */ }
+  }
+  return null;
+}
 
-function emitPlaywrightCall(level: CascadeLevel, arg: unknown): string {
-  switch (level) {
-    case 'role': {
-      const a = arg as { role: string; name: string };
-      return `page.getByRole(${JSON.stringify(a.role)}, { name: ${JSON.stringify(a.name)} })`;
-    }
-    case 'label':  return `page.getByLabel(${JSON.stringify(arg as string)})`;
-    case 'testid': return `page.getByTestId(${JSON.stringify(arg as string)})`;
-    case 'css':    return `page.locator(${JSON.stringify(arg as string)})`;
+/** The URL the spec targets: an explicit override, else a goto, else a page-object url. */
+function findTargetUrl(files: SourceFile[], baseUrl: string | undefined): string | null {
+  if (baseUrl) return baseUrl;
+  for (const f of files) {
+    const g = f.src.match(/\.goto\(\s*["'`](https?:\/\/[^"'`]+)["'`]/);
+    if (g) return g[1]!;
+  }
+  for (const f of files) {
+    const u = f.src.match(/\burl\s*[:=]\s*["'`](https?:\/\/[^"'`]+)["'`]/);
+    if (u) return u[1]!;
+  }
+  return null;
+}
+
+/* ─────────────────── live probing + confirmation ─────────────────── */
+
+function scopeFor(page: Page, frameChain: string[]): Scope {
+  let scope: Scope = page;
+  for (const f of frameChain) scope = (scope as Page | FrameLocator).frameLocator(f);
+  return scope;
+}
+
+/** Rebuild the actual Playwright locator so we can ask the live page if it still resolves. */
+function buildLocator(page: Page, call: LocatorCall) {
+  const scope = scopeFor(page, call.frameChain);
+  const a = call.args;
+  const role = (a.role ?? '') as Parameters<Page['getByRole']>[0];
+  switch (call.method) {
+    case 'getByRole': return a.name ? scope.getByRole(role, { name: a.name, exact: a.exact }) : scope.getByRole(role);
+    case 'getByLabel': return scope.getByLabel(a.label ?? '');
+    case 'getByPlaceholder': return scope.getByPlaceholder(a.placeholder ?? '');
+    case 'getByText': return scope.getByText(a.text ?? '');
+    case 'getByAltText': return scope.getByAltText(a.alt ?? '');
+    case 'getByTitle': return scope.getByTitle(a.title ?? '');
+    case 'getByTestId': return scope.getByTestId(a.testid ?? '');
+    case 'locator': return scope.locator(a.xpath ? `xpath=${a.xpath}` : (a.css ?? ''));
   }
 }
 
-function writeHealedSpec(
-  specPath: string, src: string,
-  edits: Array<{ line: number; col: number; oldRaw: string; newRaw: string }>,
-): string {
+/** The human-readable identity the original locator carried, used to re-find and confirm. */
+function intentToken(call: LocatorCall): string {
+  const a = call.args;
+  switch (call.level) {
+    case 'role': return a.name ?? '';
+    case 'label': return a.label ?? '';
+    case 'placeholder': return a.placeholder ?? '';
+    case 'text': return a.text ?? '';
+    case 'alt': return a.alt ?? '';
+    case 'title': return a.title ?? '';
+    case 'testid': return a.testid ?? '';
+    case 'css': return tokenFromCss(a.css ?? '');
+    case 'xpath': return '';
+  }
+}
+
+/** Best-effort human token from a CSS selector (id / class / attribute value). */
+function tokenFromCss(css: string): string {
+  const attr = css.match(/\[(?:data-test(?:id)?|name|aria-label|placeholder|title|alt)\s*=\s*["']?([^"'\]]+)/i);
+  if (attr) return attr[1]!.replace(/[-_]+/g, ' ').trim();
+  const idOrClass = css.match(/[#.]([A-Za-z][\w-]{1,})/);
+  if (idOrClass) return idOrClass[1]!.replace(/[-_]+/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2').trim();
+  return '';
+}
+
+function norm(s: string): string {
+  return s.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+/** Semantic strings carried by a live element: accessible name sources + text + id. */
+async function elementSemantics(locator: ReturnType<typeof buildLocator>): Promise<string[]> {
+  return locator.first().evaluate((el) => {
+    const out: string[] = [];
+    const attrs = ['aria-label', 'placeholder', 'name', 'alt', 'title', 'value', 'data-testid', 'data-test'];
+    for (let i = 0; i < attrs.length; i++) {
+      const v = el.getAttribute(attrs[i]!);
+      if (v) out.push(v);
+    }
+    const inp = el as HTMLInputElement;
+    if (typeof inp.value === 'string' && inp.value) out.push(inp.value);
+    const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+    if (t) out.push(t);
+    if (el.id) out.push(el.id);
+    return out;
+  }).catch(() => [] as string[]);
+}
+
+/**
+ * Confirm the re-resolved element is the SAME intended element: its accessible
+ * name / text / label must still carry the original token. This is the guard
+ * that makes a wrong heal (to a different element) fail instead of shipping.
+ */
+async function confirmSameElement(locator: ReturnType<typeof buildLocator>, token: string): Promise<boolean> {
+  const nt = norm(token);
+  if (nt.length < 2) return false; // nothing specific enough to confirm against
+  const sem = await elementSemantics(locator);
+  return sem.some((s) => {
+    const ns = norm(s);
+    if (!ns) return false;
+    return ns.includes(nt) || (ns.length >= 3 && nt.includes(ns));
+  });
+}
+
+/* ─────────────────────────── write-back ─────────────────────────── */
+
+interface Edit { line: number; startCol: number; endCol: number; newRaw: string }
+
+function applyEdits(src: string, edits: Edit[]): string {
   const lines = src.split('\n');
-  // Apply right-to-left within each line to keep column offsets valid.
-  const byLine = new Map<number, Array<{ col: number; oldRaw: string; newRaw: string }>>();
+  const byLine = new Map<number, Edit[]>();
   for (const e of edits) {
     const list = byLine.get(e.line) ?? [];
     list.push(e);
     byLine.set(e.line, list);
   }
-  for (const [lineNum, list] of byLine) {
-    list.sort((a, b) => b.col - a.col);
-    let line = lines[lineNum - 1] ?? '';
-    for (const e of list) {
-      line = line.slice(0, e.col) +
-             `/* qa-core: healed (was ${e.oldRaw.replace(/\*\//g, '*\\/')}) */ ${e.newRaw}` +
-             line.slice(e.col + e.oldRaw.length);
-    }
-    lines[lineNum - 1] = line;
+  for (const [ln, list] of byLine) {
+    list.sort((a, b) => b.startCol - a.startCol); // right-to-left keeps offsets valid
+    let line = lines[ln - 1] ?? '';
+    for (const e of list) line = line.slice(0, e.startCol) + e.newRaw + line.slice(e.endCol);
+    lines[ln - 1] = line;
   }
-  const ext = path.extname(specPath);
-  const base = specPath.slice(0, -ext.length);
-  const healedPath = `${base}.healed${ext}`;
-  fs.writeFileSync(healedPath, lines.join('\n'));
-  return healedPath;
+  return lines.join('\n');
+}
+
+/* ─────────────────────────── main ─────────────────────────── */
+
+export async function heal(opts: HealOptions): Promise<HealResult> {
+  const specPath = path.resolve(opts.specPath);
+  if (!fs.existsSync(specPath)) throw new Error(`Spec not found: ${specPath}`);
+  const write = opts.write !== false;
+
+  const specSrc = fs.readFileSync(specPath, 'utf8');
+  const files = gatherFiles(specPath, specSrc);
+  const calls = files.flatMap((f) => parseLocatorCalls(f.src, f.path));
+
+  const url = findTargetUrl(files, opts.baseUrl);
+  if (!url) {
+    throw new Error('Could not determine the target URL from the spec. Pass --base-url <url>.');
+  }
+
+  opts.onEvent?.({ type: 'scanned', total: calls.length, files: files.length });
+
+  const healed: HealDetail[] = [];
+  const unhealable: UnhealDetail[] = [];
+  let intact = 0;
+  const editsByFile = new Map<string, Edit[]>();
+
+  let browser: Browser | undefined;
+  try {
+    browser = await chromium.launch({ headless: true });
+    const context = await browser.newContext();
+    await installEvalShim(context);
+    const page = await context.newPage();
+    await page.goto(url, { waitUntil: 'load' });
+    await page.waitForLoadState('networkidle').catch(() => undefined);
+    opts.onEvent?.({ type: 'opened_page', url });
+
+    for (const call of calls) {
+      // 1. Does the original locator still resolve? If so, leave it untouched.
+      let count = 0;
+      try { count = await buildLocator(page, call).count(); } catch { count = 0; }
+      if (count >= 1) {
+        intact++;
+        opts.onEvent?.({ type: 'intact', selector: call.raw });
+        continue;
+      }
+
+      // 2. Broken. Re-resolve by semantic intent with the SAME ladder + healResolve.
+      opts.onEvent?.({ type: 'healing', selector: call.raw });
+      const token = intentToken(call);
+      const rel = path.relative(process.cwd(), call.file);
+      if (norm(token).length < 2) {
+        const reason = 'no semantic identity (nameless / opaque selector) to re-resolve or confirm';
+        unhealable.push({ file: call.file, selector: call.raw, reason });
+        opts.onEvent?.({ type: 'unhealed', selector: call.raw, reason, file: rel });
+        continue;
+      }
+
+      const resolved = await healResolve(page, { intent: token });
+      if (!resolved) {
+        const reason = 'could not be re-resolved on the live page';
+        unhealable.push({ file: call.file, selector: call.raw, reason });
+        opts.onEvent?.({ type: 'unhealed', selector: call.raw, reason, file: rel });
+        continue;
+      }
+      // 3. Refuse an ambiguous match — we cannot know which element was meant.
+      if (resolved.ambiguous) {
+        const reason = 'ambiguous — several elements match the intent, refusing to guess';
+        unhealable.push({ file: call.file, selector: call.raw, reason });
+        opts.onEvent?.({ type: 'unhealed', selector: call.raw, reason, file: rel });
+        continue;
+      }
+      // 4. Confirm it is the SAME intended element, not just any loose match.
+      const same = await confirmSameElement(resolved.locator, token);
+      if (!same) {
+        const reason = 're-resolved to a different element, not healing (would be wrong)';
+        unhealable.push({ file: call.file, selector: call.raw, reason });
+        opts.onEvent?.({ type: 'unhealed', selector: call.raw, reason, file: rel });
+        continue;
+      }
+
+      // 5. Emit the healed locator with the shared emitter, preserving the root.
+      let newRaw = emitLocatorCall(resolved.level, resolved.arg, false, resolved.frameChain);
+      if (call.root === 'this.page') newRaw = 'this.' + newRaw;
+      if (newRaw === call.raw) {
+        // Re-resolved to the same call it already was — nothing to change.
+        intact++;
+        opts.onEvent?.({ type: 'intact', selector: call.raw });
+        continue;
+      }
+      const list = editsByFile.get(call.file) ?? [];
+      list.push({ line: call.line, startCol: call.startCol, endCol: call.endCol, newRaw });
+      editsByFile.set(call.file, list);
+      healed.push({ file: call.file, old: call.raw, new: newRaw, level: resolved.level });
+      opts.onEvent?.({ type: 'healed', old: call.raw, new: newRaw, level: resolved.level, file: rel });
+    }
+  } finally {
+    await browser?.close();
+  }
+
+  const filesWritten: string[] = [];
+  if (write) {
+    for (const [file, edits] of editsByFile) {
+      const original = files.find((f) => f.path === file)!.src;
+      fs.writeFileSync(file, applyEdits(original, edits));
+      filesWritten.push(file);
+    }
+  }
+
+  opts.onEvent?.({
+    type: 'done', healed: healed.length, unhealed: unhealable.length,
+    intact, total: calls.length, files: filesWritten,
+  });
+
+  return {
+    healedPath: filesWritten.includes(specPath) ? specPath : (filesWritten[0] ?? null),
+    filesWritten, scanned: calls.length, intact, healed, unhealable, total: calls.length,
+  };
 }

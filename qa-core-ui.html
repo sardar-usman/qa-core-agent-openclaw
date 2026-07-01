@@ -1297,6 +1297,66 @@
   .code-btn.dl { color: var(--cyan); border-color: rgba(34, 211, 238, 0.3); }
   .code-btn.dl:hover { background: var(--cyan-soft); }
 
+  /* Framework zip download card (v3 — /explore now ships a complete project). */
+  .framework-zip-card {
+    margin-top: 10px;
+    background: linear-gradient(135deg, rgba(34, 211, 238, 0.05), rgba(99, 102, 241, 0.04));
+    border: 1px solid rgba(34, 211, 238, 0.25);
+    border-radius: 10px;
+    padding: 14px 16px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .framework-zip-icon {
+    flex: 0 0 auto;
+    width: 40px;
+    height: 40px;
+    border-radius: 8px;
+    background: rgba(34, 211, 238, 0.12);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--cyan);
+  }
+  .framework-zip-meta { flex: 1 1 auto; min-width: 0; }
+  .framework-zip-name {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 4px;
+    word-break: break-all;
+  }
+  .framework-zip-stats {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--text-3);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 12px;
+  }
+  .framework-zip-stats b { color: var(--text-2); font-weight: 500; }
+  .framework-zip-dl {
+    flex: 0 0 auto;
+    background: var(--cyan-soft);
+    color: var(--cyan);
+    border: 1px solid rgba(34, 211, 238, 0.4);
+    border-radius: 8px;
+    padding: 8px 14px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.15s var(--ease);
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .framework-zip-dl:hover { background: rgba(34, 211, 238, 0.18); transform: translateY(-1px); }
+  .framework-zip-dl:active { transform: translateY(0); }
+
   .code-content {
     padding: 14px 16px;
     font-family: var(--mono);
@@ -2269,6 +2329,19 @@
 
   .recent-run-meta .dot-sep { color: var(--text-3); margin: 0 5px; }
 
+  /* 1-line Critic summary preview under the title — disambiguates
+     same-site, same-features runs. Full text lives in the expanded
+     run-card body; this is the at-a-glance line. */
+  .recent-run-summary {
+    font-size: 11px;
+    color: var(--text-3);
+    margin-top: 2px;
+    line-height: 1.4;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
   .recent-run-time {
     font-family: var(--mono);
     font-size: 10.5px;
@@ -2494,6 +2567,19 @@
     font-size: 10.5px;
     color: var(--text-2);
     margin-top: 2px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* 1-line summary preview in the collapsed run-card head. The full
+     summary still renders inside the expanded body — this is the
+     differentiator the user can see without opening the card. */
+  .run-card-summary-preview {
+    font-size: 11px;
+    color: var(--text-3);
+    margin-top: 2px;
+    line-height: 1.4;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -3189,6 +3275,12 @@ function setStatus(on) {
 }
 
 function handleAgentMessage(data) {
+  // v3: gateway sends a structured framework_zip message after /explore.
+  // Render it as a download card, not as JSON-stringified text.
+  if (data && data.type === 'framework_zip' && typeof data.base64 === 'string') {
+    renderFrameworkZipMessage(data);
+    return;
+  }
   const text = data.text || data.message || data.content || JSON.stringify(data);
   // Fix 3: the gateway sends a hello on every connect. Already represented by
   // the green status pill, so we convert it to a one-shot toast rather than
@@ -3198,6 +3290,102 @@ function handleAgentMessage(data) {
     return;
   }
   appendAgentMessage(text, data);
+}
+
+/**
+ * Render a download card for the framework_zip message the gateway sends
+ * after /explore. The base64 payload is decoded on-click and downloaded as
+ * a real .zip file via an <a download> trigger.
+ */
+function renderFrameworkZipMessage(data) {
+  removeThinking();
+  const now = new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+  const msgs = document.getElementById('messages');
+  const el = document.createElement('div');
+  el.className = 'msg agent';
+
+  const avatar = document.createElement('div');
+  avatar.className = 'msg-avatar';
+  avatar.innerHTML = AGENT_AVATAR_SVG;
+
+  const body = document.createElement('div');
+  body.className = 'msg-body';
+
+  const bubble = document.createElement('div');
+  bubble.className = 'msg-bubble';
+
+  const sizeKb = (data.sizeBytes || 0) / 1024;
+  const sizeLabel = sizeKb >= 1024 ? (sizeKb / 1024).toFixed(2) + ' MB' : sizeKb.toFixed(1) + ' KB';
+
+  bubble.innerHTML = '<div style="font-size:12.5px;margin-bottom:8px;color:var(--text-2)">Your complete Playwright framework is ready to download.</div>';
+
+  const card = document.createElement('div');
+  card.className = 'framework-zip-card';
+  card.innerHTML =
+    '<div class="framework-zip-icon">' +
+    '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' +
+    '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>' +
+    '</svg></div>' +
+    '<div class="framework-zip-meta">' +
+    '<div class="framework-zip-name">' + escHtml(data.filename || 'framework.zip') + '</div>' +
+    '<div class="framework-zip-stats">' +
+    '<span><b>' + (data.scenarios != null ? data.scenarios : '?') + '</b> scenarios</span>' +
+    '<span><b>' + (data.fileCount != null ? data.fileCount : '?') + '</b> files</span>' +
+    '<span><b>' + sizeLabel + '</b></span>' +
+    '</div></div>';
+
+  const dlBtn = document.createElement('button');
+  dlBtn.className = 'framework-zip-dl';
+  dlBtn.type = 'button';
+  dlBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Download';
+  dlBtn.addEventListener('click', () => triggerFrameworkZipDownload(data));
+  card.appendChild(dlBtn);
+
+  bubble.appendChild(card);
+
+  const time = document.createElement('div');
+  time.className = 'msg-time';
+  time.textContent = now;
+
+  body.appendChild(bubble);
+  body.appendChild(time);
+  el.appendChild(avatar);
+  el.appendChild(body);
+  msgs.appendChild(el);
+  msgs.scrollTop = msgs.scrollHeight;
+
+  // Persist a minimal run entry so the dashboard / Results panel reflects this run.
+  // We don't have the spec source here (the file lives inside the zip), so we
+  // pass the filename as the title — addResult tolerates that.
+  if (typeof updateStats === 'function') updateStats('explore');
+  if (typeof addResult === 'function') {
+    addResult('explore', data.filename || 'framework.zip', '', [data.filename || 'framework.zip']);
+  }
+}
+
+/**
+ * Convert base64 → Blob → object URL → trigger an <a download>. Works in
+ * every modern browser without server help. Memory cleaned up after the
+ * click; the Blob URL is revoked.
+ */
+function triggerFrameworkZipDownload(data) {
+  try {
+    const bin = atob(data.base64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const blob = new Blob([bytes], { type: 'application/zip' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = data.filename || 'framework.zip';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    showToast('Downloaded ' + (data.filename || 'framework.zip'), 'success');
+  } catch (err) {
+    showToast('Download failed: ' + (err && err.message ? err.message : 'unknown error'), 'error');
+  }
 }
 
 function summarizeForLog(data) {
@@ -3549,6 +3737,7 @@ function simulateExplore(url) {
     type: 'explore',
     target: '/explore ' + url,
     host: hostFromUrl(url),
+    features: ['login'],
     scenarios: 6,
     passRate: 100,
     costUsd: 0.082,
@@ -3791,7 +3980,7 @@ function collectFiles() {
   const files = [];
   for (const r of runs) {
     if (!r || !r.spec) continue;
-    const base = r.host || r.target || 'spec';
+    const base = brandFromHost(r.host) || r.host || r.target || 'spec';
     const ext = (selectedLang === 'js') ? '.spec.js' : '.spec.ts';
     files.push({
       runId: r.id,
@@ -4049,8 +4238,8 @@ function renderDashboard() {
       const avgPass = s.runsWithPass ? Math.round(s.passes / s.runsWithPass) : null;
       // Fix 4: same thresholds as recent-runs. >=90 ok, 60-89 warn, <60 bad.
       const cls = avgPass == null ? '' : avgPass >= 90 ? 'ok' : avgPass >= 60 ? 'warn' : 'bad';
-      return `<div class="site-card ${cls}" onclick="fillInput('/explore https://${escAttr(s.host)}/')">
-        <div class="site-host">${escHtml(s.host)}</div>
+      return `<div class="site-card ${cls}" onclick="fillInput('/explore https://${escAttr(s.host)}/')" title="${escAttr(s.host)}">
+        <div class="site-host">${escHtml(brandFromHost(s.host) || s.host)}</div>
         <div class="site-meta">
           <span>${s.runs} runs</span>
           <span class="site-pass">${avgPass == null ? 'no data' : avgPass + '% pass'}</span>
@@ -4069,14 +4258,18 @@ function recentRunHtml(r) {
   // Fix 4: tighter thresholds so low pass-rates surface clearly.
   // >=90 green, 60-89 amber, <60 rose.
   const status = r.passRate == null ? '' : r.passRate >= 90 ? 'ok' : r.passRate >= 60 ? 'warn' : 'bad';
-  const target = r.host || r.target || 'run';
+  const target = runTitle(r.host, r.target, r.features);
   const passStr = r.passRate == null ? '' : ` · ${r.passRate}% pass`;
-  return `<div class="recent-run ${status}" data-id="${r.id}">
+  const summaryLine = r.summary
+    ? `<div class="recent-run-summary" title="${escAttr(r.summary)}">${escHtml(r.summary)}</div>`
+    : '';
+  return `<div class="recent-run ${status}" data-id="${r.id}" title="${escAttr(r.host || r.target || '')}">
     <div class="recent-run-icon">
       ${iconForType(r.type)}
     </div>
     <div style="min-width:0">
       <div class="recent-run-target">${escHtml(target)}</div>
+      ${summaryLine}
       <div class="recent-run-meta">${r.scenarios || 0} scenarios${passStr} · $${(r.costUsd || 0).toFixed(4)}</div>
     </div>
     <div class="recent-run-time">${timeAgo(r.timestamp)}</div>
@@ -4099,6 +4292,36 @@ function timeAgo(ts) {
 
 function hostFromUrl(u) {
   try { return new URL(u).host; } catch { return null; }
+}
+
+// Mirrors src/agent/scaffold.ts `brandSlug()`. Used for DISPLAY only —
+// turns "www.saucedemo.com" → "saucedemo", "the-internet.herokuapp.com"
+// → "the-internet-herokuapp". The full host stays in r.host / s.host as
+// the underlying identifier so /explore re-runs and sitesMap keying still
+// work. Display sites (site cards, run cards, download filenames) read
+// through this helper so the user sees the brand, not the URL.
+function brandFromHost(host) {
+  if (!host) return '';
+  let h = String(host).toLowerCase().replace(/^www\./, '');
+  const parts = h.split('.');
+  if (parts.length > 1) parts.pop();
+  return parts.join('-')
+    .replace(/[^a-z0-9-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 60) || h || '';
+}
+
+// Disambiguates same-site runs by appending the features tested.
+// "saucedemo" + ["login","cart"] → "saucedemo · login, cart".
+// Caps the visible list at 3 features to keep titles short; remainder
+// becomes "+N more". Returns just the brand when features are absent.
+function runTitle(host, target, features) {
+  const brand = brandFromHost(host) || host || target || 'run';
+  if (!Array.isArray(features) || features.length === 0) return brand;
+  const visible = features.slice(0, 3).join(', ');
+  const extra = features.length > 3 ? ` +${features.length - 3} more` : '';
+  return brand + ' · ' + visible + extra;
 }
 
 function renderRunHistory() {
@@ -4127,7 +4350,7 @@ function renderRunHistory() {
         btn.textContent = 'copied ✓';
         setTimeout(() => btn.textContent = 'copy spec', 1600);
       } else if (btn.dataset.action === 'download') {
-        downloadRaw(run.spec || '', (run.host || 'spec') + '.spec.ts');
+        downloadRaw(run.spec || '', (brandFromHost(run.host) || run.host || 'spec') + '.spec.ts');
       } else if (btn.dataset.action === 'rerun') {
         if (run.target) { fillInput(run.target); document.getElementById('msgInput').focus(); }
       }
@@ -4146,9 +4369,11 @@ function runCardHtml(r) {
     ? `<div class="run-card-metric">
          <span class="metric-label">Stability</span>
          <span class="stat-stable">${r.stability.passed || 0} stable</span>
+         ${r.stability.recovered ? `<span class="stat-stable" title="Recovered by the Stabilizer (Stage 5b) — flake fix succeeded">↻ ${r.stability.recovered} recovered</span>` : ''}
          <span class="stat-flaky">${r.stability.flaky || 0} flaky</span>
          <span class="stat-broken">${r.stability.broken || 0} broken</span>
          <span class="metric-pill">flake_rate ${((r.stability.flakeRate || 0) * 100).toFixed(1)}%</span>
+         ${r.stability.stabilizerCostUsd ? `<span class="metric-pill" title="LLM cost spent on Stabilizer proposals">stabilizer $${r.stability.stabilizerCostUsd.toFixed(4)}</span>` : ''}
        </div>`
     : '';
   const replayLine = r.replay
@@ -4166,11 +4391,15 @@ function runCardHtml(r) {
        </div>`
     : '';
   const status = r.passRate == null ? '' : r.passRate + '% pass';
+  const summaryPreview = r.summary
+    ? `<div class="run-card-summary-preview" title="${escAttr(r.summary)}">${escHtml(r.summary)}</div>`
+    : '';
   return `<div class="run-card" data-id="${r.id}">
     <div class="run-card-head">
       <div class="run-card-badge ${escAttr(r.type)}">${escHtml(r.type)}</div>
       <div style="min-width:0">
-        <div class="run-card-title">${escHtml(r.host || r.target || 'run')}</div>
+        <div class="run-card-title" title="${escAttr(r.host || r.target || '')}">${escHtml(runTitle(r.host, r.target, r.features))}</div>
+        ${summaryPreview}
         <div class="run-card-meta">${r.scenarios || 0} scenarios · $${(r.costUsd || 0).toFixed(4)} · ${timeAgo(r.timestamp)}</div>
       </div>
       <div class="run-card-status">${status}</div>
@@ -4272,8 +4501,12 @@ function renderStabilityStats(s) {
   const el = document.getElementById('pipeStabilityStats');
   if (!el || !s) return;
   const flakeRatePct = ((s.flakeRate || 0) * 100).toFixed(1);
+  const recoveredChip = s.recovered
+    ? '<span class="stat-stable" title="Recovered by the Stabilizer (Stage 5b)">↻ ' + s.recovered + ' recovered</span>'
+    : '';
   el.innerHTML =
     '<span class="stat-stable">' + (s.passed || 0) + ' stable</span>' +
+    recoveredChip +
     '<span class="stat-flaky">'  + (s.flaky  || 0) + ' flaky</span>' +
     '<span class="stat-broken">' + (s.broken || 0) + ' broken</span>' +
     '<span>flake_rate=' + flakeRatePct + '%</span>';

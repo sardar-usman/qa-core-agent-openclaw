@@ -1,0 +1,373 @@
+- generic [ref=e2]:
+  - banner [ref=e3]:
+    - generic [ref=e4]:
+      - generic [ref=e5]:
+        - img [ref=e7]
+        - generic [ref=e9]:
+          - generic [ref=e10]: QA-Core
+          - generic [ref=e11]: Autonomous QA Agent
+        - generic [ref=e16]: live
+      - generic [ref=e17]:
+        - generic [ref=e20]: not connected
+        - generic [ref=e21]:
+          - textbox "Gateway URL" [ref=e22]:
+            - /placeholder: ws://127.0.0.1:18789
+            - text: ws://127.0.0.1:18789
+          - button "Connect" [ref=e23] [cursor=pointer]
+  - main [ref=e24]:
+    - generic [ref=e26]:
+      - complementary [ref=e28]:
+        - generic [ref=e29]:
+          - generic [ref=e32]: What you can do
+          - generic [ref=e33]: "3"
+        - generic [ref=e34]:
+          - button "/explore Explore a website Point it at any URL. The agent opens a real browser, figures out the main user flows, and clicks through them. You get back a ready-to-run set of Playwright tests, neatly organized. Each feature you test gets its own page object file and its own test folder. /explore <url> Click to use" [ref=e35] [cursor=pointer]:
+            - generic [ref=e36]:
+              - generic [ref=e37]: /explore
+              - img [ref=e40]
+            - generic [ref=e43]:
+              - generic [ref=e44]: Explore a website
+              - paragraph [ref=e45]: Point it at any URL. The agent opens a real browser, figures out the main user flows, and clicks through them. You get back a ready-to-run set of Playwright tests, neatly organized.
+              - paragraph [ref=e46]: Each feature you test gets its own page object file and its own test folder.
+            - generic [ref=e47]:
+              - generic [ref=e48]: /explore <url>
+              - generic [ref=e49]:
+                - text: Click to use
+                - img [ref=e50]
+          - button "/generate Turn a story into tests Paste a user story or a Jira ticket. The agent reads the acceptance criteria and writes the tests for you — covering the happy path, the things that should fail, and the awkward edge cases. Works from your text alone. No browser needed for this one. /generate <user story> Click to use" [ref=e52] [cursor=pointer]:
+            - generic [ref=e53]:
+              - generic [ref=e54]: /generate
+              - img [ref=e57]
+            - generic [ref=e59]:
+              - generic [ref=e60]: Turn a story into tests
+              - paragraph [ref=e61]: Paste a user story or a Jira ticket. The agent reads the acceptance criteria and writes the tests for you — covering the happy path, the things that should fail, and the awkward edge cases.
+              - paragraph [ref=e62]: Works from your text alone. No browser needed for this one.
+            - generic [ref=e63]:
+              - generic [ref=e64]: /generate <user story>
+              - generic [ref=e65]:
+                - text: Click to use
+                - img [ref=e66]
+          - button "/heal Fix a broken test Got a test that started failing because the page changed? Point /heal at the spec file. The agent opens the live page, finds the new selectors, and rewrites the test so it works again. Handles most UI rewrites that would normally break your locators. /heal <spec-path> Click to use" [ref=e68] [cursor=pointer]:
+            - generic [ref=e69]:
+              - generic [ref=e70]: /heal
+              - img [ref=e73]
+            - generic [ref=e78]:
+              - generic [ref=e79]: Fix a broken test
+              - paragraph [ref=e80]: Got a test that started failing because the page changed? Point /heal at the spec file. The agent opens the live page, finds the new selectors, and rewrites the test so it works again.
+              - paragraph [ref=e81]: Handles most UI rewrites that would normally break your locators.
+            - generic [ref=e82]:
+              - generic [ref=e83]: /heal <spec-path>
+              - generic [ref=e84]:
+                - text: Click to use
+                - img [ref=e85]
+        - generic [ref=e87]:
+          - generic [ref=e91]: Your totals
+          - generic [ref=e93]:
+            - generic [ref=e94]:
+              - generic [ref=e95]: Tests written
+              - generic [ref=e96]: "10"
+            - generic [ref=e97]:
+              - generic [ref=e98]: Times run
+              - generic [ref=e99]: "2"
+            - generic [ref=e100]:
+              - generic [ref=e101]: Files saved
+              - generic [ref=e102]: "1"
+            - generic [ref=e103]:
+              - generic [ref=e104]: Average pass
+              - generic [ref=e105]: 100%
+      - generic [ref=e106]:
+        - generic [ref=e109]:
+          - generic [ref=e110]:
+            - generic [ref=e111]:
+              - generic [ref=e112]: QA Automation Agent
+              - generic [ref=e116]: Version 3 · one file per feature
+            - heading "QA-Core Agent" [level=1] [ref=e117]
+            - paragraph [ref=e118]: QA-Core is an AI agent that writes your Playwright tests for you. It opens a real browser, clicks around your app like a tester would, reviews its own work, and saves only the tests that actually pass. Every test you receive has already been run five times in clean browser sessions — so what lands on disk is what works. Built on Claude with the OpenClaw runtime.
+            - generic [ref=e119]:
+              - generic [ref=e120]:
+                - generic [ref=e121]: Runs so far
+                - generic [ref=e122]: "2"
+              - generic [ref=e124]:
+                - generic [ref=e125]: Tests written
+                - generic [ref=e126]: "10"
+              - generic [ref=e128]:
+                - generic [ref=e129]: Steps in the pipeline
+                - generic [ref=e130]: "5"
+              - generic [ref=e132]:
+                - generic [ref=e133]: Output language
+                - generic [ref=e134]: TypeScript or JavaScript
+          - generic [ref=e135]:
+            - generic [ref=e136]:
+              - generic [ref=e137]:
+                - generic [ref=e139]: SERVER
+                - generic [ref=e140]: not connected
+              - generic [ref=e141]:
+                - generic [ref=e143]: BROWSER
+                - generic [ref=e144]: ready
+              - generic [ref=e145]:
+                - generic [ref=e147]: SPENT
+                - generic [ref=e148]: $0.7179
+              - button "o Opus 4.7" [ref=e150] [cursor=pointer]:
+                - generic [ref=e151]: o
+                - generic [ref=e152]: Opus 4.7
+                - img [ref=e153]
+            - button "Refresh" [ref=e155] [cursor=pointer]:
+              - img [ref=e156]
+              - text: Refresh
+        - generic [ref=e159]:
+          - generic [ref=e162]:
+            - generic [ref=e163]:
+              - generic [ref=e164]:
+                - generic [ref=e165]:
+                  - generic [ref=e166]: What QA-Core is doing
+                  - generic [ref=e167]: idle
+                - heading "Waiting for a command" [level=3] [ref=e168]
+                - paragraph [ref=e169]: AI plans the tests, then the browser proves them. Nothing ships until it has actually worked.
+              - button "Collapse pipeline" [ref=e170] [cursor=pointer]:
+                - img [ref=e171]
+            - generic [ref=e175]:
+              - generic [ref=e176]: STEPS COMPLETE
+              - generic [ref=e177]: 0 of 5 · 0%
+            - generic [ref=e178]:
+              - generic [ref=e180]:
+                - generic [ref=e182]: Haiku
+                - generic [ref=e183]: plans the tests
+              - generic [ref=e186]:
+                - generic [ref=e188]: Opus
+                - generic [ref=e189]: walks the site
+              - generic [ref=e192]:
+                - generic [ref=e194]: Sonnet
+                - generic [ref=e195]: grades the work
+              - generic [ref=e198]:
+                - generic [ref=e200]: Replay
+                - generic [ref=e201]: runs them again
+              - generic [ref=e204]:
+                - generic [ref=e206]: Stability
+                - generic [ref=e207]: kills the flakes
+            - list [ref=e209]:
+              - listitem [ref=e210]:
+                - generic [ref=e211]: "1"
+                - generic [ref=e212]:
+                  - img [ref=e214]
+                  - generic [ref=e216]:
+                    - generic [ref=e217]:
+                      - generic [ref=e218]: Planner
+                      - generic [ref=e219]: Haiku 4.5
+                    - paragraph [ref=e220]: Looks at the page and decides which tests to write.
+                  - generic [ref=e221]: waiting
+              - listitem [ref=e222]:
+                - generic [ref=e223]: "2"
+                - generic [ref=e224]:
+                  - img [ref=e226]
+                  - generic [ref=e229]:
+                    - generic [ref=e230]:
+                      - generic [ref=e231]: Explorer
+                      - generic [ref=e232]: Opus 4.7
+                    - paragraph [ref=e233]: Opens the browser and actually walks through each scenario.
+                  - generic [ref=e234]: waiting
+              - listitem [ref=e235]:
+                - generic [ref=e236]: "3"
+                - generic [ref=e237]:
+                  - img [ref=e239]
+                  - generic [ref=e242]:
+                    - generic [ref=e243]:
+                      - generic [ref=e244]: Critic
+                      - generic [ref=e245]: Sonnet 4.6
+                    - paragraph [ref=e246]: "Reviews each test and grades it: ship it, weak, or rewrite."
+                  - generic [ref=e247]: waiting
+              - listitem [ref=e248]:
+                - generic [ref=e249]: "4"
+                - generic [ref=e250]:
+                  - img [ref=e252]
+                  - generic [ref=e255]:
+                    - generic [ref=e256]:
+                      - generic [ref=e257]: Reality check
+                      - generic [ref=e258]: Playwright · no AI
+                    - paragraph [ref=e259]: Runs every test again from scratch. Anything that fails gets dropped.
+                  - generic [ref=e260]: waiting
+              - listitem [ref=e261]:
+                - generic [ref=e262]: "5"
+                - generic [ref=e263]:
+                  - img [ref=e265]
+                  - generic [ref=e270]:
+                    - generic [ref=e271]:
+                      - generic [ref=e272]: Stability
+                      - generic [ref=e273]: Three reruns · no AI
+                    - paragraph [ref=e274]: Runs the survivors three more times. Flaky tests get thrown out.
+                  - generic [ref=e275]: waiting
+              - listitem [ref=e276]:
+                - generic [ref=e278]: ·
+                - generic [ref=e279]:
+                  - img [ref=e281]
+                  - generic [ref=e286]:
+                    - generic [ref=e287]:
+                      - generic [ref=e288]: Healer
+                      - generic [ref=e289]: Sonnet 4.6
+                    - paragraph [ref=e290]: Optional — only runs when you fire /heal. Fixes broken selectors on the live page.
+                  - generic [ref=e291]: on demand
+          - generic [ref=e294]:
+            - generic [ref=e295]:
+              - generic [ref=e296]:
+                - generic [ref=e297]:
+                  - generic [ref=e298]: Your numbers
+                  - generic [ref=e299]: all-time
+                - heading "Everything you've run so far" [level=3] [ref=e300]
+              - button "See all" [ref=e301] [cursor=pointer]
+            - generic [ref=e302]:
+              - generic [ref=e303]: Times you've run a command
+              - generic [ref=e304]:
+                - generic [ref=e305]: "0"
+                - generic [ref=e306]: total
+            - generic [ref=e307]:
+              - generic [ref=e308]:
+                - generic [ref=e309]: Tests written
+                - generic [ref=e311]: "0"
+              - generic [ref=e312]:
+                - generic [ref=e313]: Average pass
+                - generic [ref=e314]:
+                  - generic [ref=e315]: "0"
+                  - generic [ref=e316]: "%"
+              - generic [ref=e317]:
+                - generic [ref=e318]: Spent
+                - generic [ref=e319]:
+                  - generic [ref=e320]: $
+                  - generic [ref=e321]: "0.00"
+            - generic [ref=e323]:
+              - generic [ref=e324]: RUNS WITH PASS/FAIL DATA
+              - generic [ref=e325]: 50%
+        - generic [ref=e328]:
+          - generic [ref=e330]:
+            - generic [ref=e331]:
+              - generic [ref=e332]: Recent runs
+              - generic [ref=e333]: "2"
+            - heading "What you've run lately" [level=3] [ref=e334]
+            - paragraph [ref=e335]: Most recent at the top. Click any run to see the AI's review and how each test did.
+          - list [ref=e336]:
+            - listitem [ref=e337]:
+              - button "saucedemo · login, cart explore 17h ago Login + cart happy paths verified end-to-end; one weak verdict on add-to-cart. 6 scenarios · $0.0820 · saucedemo 100%" [ref=e338] [cursor=pointer]:
+                - img [ref=e340]
+                - generic [ref=e343]:
+                  - generic [ref=e344]:
+                    - generic [ref=e345]:
+                      - generic [ref=e346]: saucedemo · login, cart
+                      - generic [ref=e347]: explore
+                    - generic [ref=e348]: 17h ago
+                  - paragraph [ref=e349]: Login + cart happy paths verified end-to-end; one weak verdict on add-to-cart.
+                  - generic [ref=e350]:
+                    - generic [ref=e351]:
+                      - generic [ref=e352]: 6 scenarios
+                      - generic [ref=e353]: ·
+                      - generic [ref=e354]: $0.0820
+                      - generic [ref=e355]: ·
+                      - generic [ref=e356]: saucedemo
+                    - generic [ref=e359]: 100%
+                - img [ref=e360]
+            - listitem [ref=e362]:
+              - 'button "saucedemo · login, cart explore 2d ago The spec is small but mostly solid. The two happy-path scenarios (login redirect and cart badge) have tight, specific assertions that would catch real regressions. The negative-password test also checks exact copy, which is good. The only weak spot is the whitespace-username edge case: it asserts a login failure, which is reasonable, but the scenario conflates two distinct behaviours (does the site trim input? should it?) without a complementary positive case, leaving the intent unclear and making it easy to misinterpret a future intentional change as a pass or fail. Overall quality is above average for a login/cart surface; adding a couple more edge cases (empty credentials, locked-out user) would round it out well. 4 scenarios · $0.6359 · saucedemo" [ref=e363] [cursor=pointer]':
+                - img [ref=e365]
+                - generic [ref=e368]:
+                  - generic [ref=e369]:
+                    - generic [ref=e370]:
+                      - generic [ref=e371]: saucedemo · login, cart
+                      - generic [ref=e372]: explore
+                    - generic [ref=e373]: 2d ago
+                  - paragraph [ref=e374]: "The spec is small but mostly solid. The two happy-path scenarios (login redirect and cart badge) have tight, specific assertions that would catch real regressions. The negative-password test also checks exact copy, which is good. The only weak spot is the whitespace-username edge case: it asserts a login failure, which is reasonable, but the scenario conflates two distinct behaviours (does the site trim input? should it?) without a complementary positive case, leaving the intent unclear and making it easy to misinterpret a future intentional change as a pass or fail. Overall quality is above average for a login/cart surface; adding a couple more edge cases (empty credentials, locked-out user) would round it out well."
+                  - generic [ref=e376]:
+                    - generic [ref=e377]: 4 scenarios
+                    - generic [ref=e378]: ·
+                    - generic [ref=e379]: $0.6359
+                    - generic [ref=e380]: ·
+                    - generic [ref=e381]: saucedemo
+                - img [ref=e382]
+        - generic [ref=e385]:
+          - generic [ref=e386]:
+            - generic [ref=e387]:
+              - generic [ref=e388]:
+                - generic [ref=e389]: Sites you've tested
+                - generic [ref=e390]: "1"
+              - heading "How each site is doing" [level=3] [ref=e391]
+              - paragraph [ref=e392]: Pass rates use only the runs that actually measured pass/fail, so older runs without that data don't pull the score down.
+            - button "Add a site" [ref=e393] [cursor=pointer]:
+              - img [ref=e394]
+              - text: Add a site
+          - generic [ref=e395]:
+            - button "saucedemo www.saucedemo.com 100% passing 2 runs 17h ago" [ref=e396] [cursor=pointer]:
+              - generic [ref=e398]: saucedemo
+              - generic [ref=e399]: www.saucedemo.com
+              - generic [ref=e401]:
+                - generic [ref=e402]: 100%
+                - generic [ref=e403]: passing
+              - generic [ref=e405]:
+                - generic [ref=e406]: 2 runs
+                - generic [ref=e407]: 17h ago
+            - button "Test a new site /explore <url>" [ref=e408] [cursor=pointer]:
+              - img [ref=e410]
+              - generic [ref=e411]: Test a new site
+              - generic [ref=e412]: /explore <url>
+        - generic [ref=e413]:
+          - generic [ref=e414]:
+            - generic [ref=e420]: QA-Core terminal
+            - generic [ref=e421]:
+              - generic [ref=e422]:
+                - button "ts" [ref=e423] [cursor=pointer]
+                - button "js" [ref=e424] [cursor=pointer]
+              - generic [ref=e425]: demo mode
+          - generic [ref=e428]:
+            - img [ref=e430]
+            - generic [ref=e432]: Ready when you are
+            - paragraph [ref=e433]:
+              - text: "Type one of these to get started:"
+              - code [ref=e434]: /explore <url>
+              - text: to test a site,
+              - code [ref=e435]: /generate <story>
+              - text: to turn a story into tests, or
+              - code [ref=e436]: /heal <spec>
+              - text: to fix a broken test.
+          - generic [ref=e437]:
+            - button "Test SauceDemo" [ref=e438] [cursor=pointer]
+            - button "Test PracticeSoftwareTesting" [ref=e439] [cursor=pointer]
+            - button "Try a login story" [ref=e440] [cursor=pointer]
+            - generic [ref=e441]: writing in ts
+          - generic [ref=e442]:
+            - generic [ref=e443]: qa-core $
+            - textbox "Command input" [ref=e444]:
+              - /placeholder: Type a command — try /explore, /generate, or /heal
+            - button "Send" [disabled] [ref=e445]:
+              - img [ref=e446]
+      - complementary [ref=e449]:
+        - generic [ref=e450]:
+          - generic [ref=e451]:
+            - generic [ref=e454]: Activity
+            - generic [ref=e457]: local
+          - button "Refresh" [ref=e458] [cursor=pointer]:
+            - img [ref=e459]
+        - generic [ref=e462]:
+          - tablist [ref=e463]:
+            - tab "results" [selected] [ref=e464] [cursor=pointer]: results
+            - tab "files" [ref=e466] [cursor=pointer]
+            - tab "log" [ref=e467] [cursor=pointer]
+          - list [ref=e470]:
+            - listitem [ref=e471]:
+              - button "explore 17h ago saucedemo · login, cart Login + cart happy paths verified end-to-end; one weak verdict on add-to-cart. 6 scenarios · $0.0820 · 100% pass" [ref=e472] [cursor=pointer]:
+                - generic [ref=e473]:
+                  - generic [ref=e474]: explore
+                  - generic [ref=e475]: 17h ago
+                - generic [ref=e476]: saucedemo · login, cart
+                - generic "Login + cart happy paths verified end-to-end; one weak verdict on add-to-cart." [ref=e477]
+                - generic [ref=e478]:
+                  - generic [ref=e479]: 6 scenarios
+                  - generic [ref=e480]: ·
+                  - generic [ref=e481]: $0.0820
+                  - generic [ref=e482]: ·
+                  - generic [ref=e483]: 100% pass
+            - listitem [ref=e484]:
+              - 'button "explore 2d ago saucedemo · login, cart The spec is small but mostly solid. The two happy-path scenarios (login redirect and cart badge) have tight, specific assertions that would catch real regressions. The negative-password test also checks exact copy, which is good. The only weak spot is the whitespace-username edge case: it asserts a login failure, which is reasonable, but the scenario conflates two distinct behaviours (does the site trim input? should it?) without a complementary positive case, leaving the intent unclear and making it easy to misinterpret a future intentional change as a pass or fail. Overall quality is above average for a login/cart surface; adding a couple more edge cases (empty credentials, locked-out user) would round it out well. 4 scenarios · $0.6359" [ref=e485] [cursor=pointer]':
+                - generic [ref=e486]:
+                  - generic [ref=e487]: explore
+                  - generic [ref=e488]: 2d ago
+                - generic [ref=e489]: saucedemo · login, cart
+                - 'generic "The spec is small but mostly solid. The two happy-path scenarios (login redirect and cart badge) have tight, specific assertions that would catch real regressions. The negative-password test also checks exact copy, which is good. The only weak spot is the whitespace-username edge case: it asserts a login failure, which is reasonable, but the scenario conflates two distinct behaviours (does the site trim input? should it?) without a complementary positive case, leaving the intent unclear and making it easy to misinterpret a future intentional change as a pass or fail. Overall quality is above average for a login/cart surface; adding a couple more edge cases (empty credentials, locked-out user) would round it out well." [ref=e490]'
+                - generic [ref=e491]:
+                  - generic [ref=e492]: 4 scenarios
+                  - generic [ref=e493]: ·
+                  - generic [ref=e494]: $0.6359

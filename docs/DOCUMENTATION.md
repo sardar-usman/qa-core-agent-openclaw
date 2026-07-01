@@ -1427,8 +1427,7 @@ qa-core-agent/
 │   ├── smoke-planner-parse.ts            # regression test: 5 Haiku format variants
 │   ├── smoke-abandoned.ts                # regression test: runtime drops abandoned scenarios
 │   ├── smoke-ui.ts                       # regression test: UI loads without JS errors
-│   ├── smoke-dashboard-math.ts           # regression test: dashboard per-site math
-│   └── render-features-pdf.ts            # generates the feature PDF report
+│   └── smoke-dashboard-math.ts           # regression test: dashboard per-site math
 │
 ├── docs/
 │   ├── DOCUMENTATION.md                  # this file (high-level guide)

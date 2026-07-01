@@ -1,7 +1,15 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { emitLocatorCall } from './selectors.js';
-import type { Assertion, RunReport, Scenario, SelectorRecord, TraceStep } from './trace.js';
+import { uniqueCallExpr, inlineUniqueDataFns } from './unique-data.js';
+import type { Assertion, CaptureSource, RunReport, Scenario, SelectorRecord, TraceStep } from './trace.js';
+
+/**
+ * How long the emitted assert_compare poll waits for an async state change (a
+ * sort, a re-render) to settle before failing. Matches the replay engine's
+ * DEFAULT_TIMEOUT_MS so the spec and the in-process check agree.
+ */
+const COMPARE_POLL_TIMEOUT_MS = 10_000;
 
 /**
  * Turn a verified trace into a runnable Playwright spec.
@@ -43,6 +51,13 @@ export function transcribe(opts: TranscribeOptions): TranscribeResult {
   lines.push(` * Selectors prefer accessibility (role/label) over CSS — see report.cascadeStats.`);
   lines.push(` */`);
   lines.push('');
+  // Inline the unique-data helpers if any scenario fills a generated field, so
+  // this single-file spec stays self-contained (no helpers/ to import from).
+  const usesGenerated = report.scenarios.some((s) => s.steps.some((st) => st.kind === 'fill' && st.generate));
+  if (usesGenerated) {
+    lines.push(inlineUniqueDataFns());
+    lines.push('');
+  }
   lines.push(`test.describe(${q(titleFromUrl(report.url))}, () => {`);
   // Per-test isolation: fresh cookies + storage per scenario. The agent runs
   // exploration with the same isolation, so this matches recorded behavior.
@@ -79,35 +94,136 @@ function emitStep(step: TraceStep): string[] {
     case 'click':
       return [`await ${loc(step.target)}.click();`];
     case 'fill':
-      return [`await ${loc(step.target)}.fill(${q(step.value)});`];
+      return [`await ${loc(step.target)}.fill(${step.generate ? uniqueCallExpr(step.generate) : q(step.value)});`];
     case 'press':
       return [`await ${loc(step.target)}.press(${q(step.key)});`];
+    case 'select_option':
+      return [`await ${loc(step.target)}.${selectOptionExpr(step.by, step.option)};`];
+    case 'set_checked':
+      return [`await ${loc(step.target)}.${step.checked ? 'check' : 'uncheck'}();`];
+    case 'set_input_files':
+      return [`await ${loc(step.target)}.setInputFiles(${filesArg(step.files)});`];
     case 'wait':
       return [`await page.waitForTimeout(${step.ms});`];
+    case 'stability_wait':
+      return [`await page.waitForTimeout(${step.ms}); // stability comparison wait`];
     case 'assert':
       return emitAssertion(step.assertion);
     case 'checkpoint':
       return [`// — ${step.label}`];
+    case 'capture': {
+      // Read the REAL value off the page into a const the later assert_compare
+      // reads back. Count uses the multi-match locator; attribute/text use
+      // .first() so a multi-match selector never trips strict mode.
+      const rhs = captureReadExpr(step.source, locFirst(step.target), locCount(step.target), step.attribute);
+      return [`const ${step.varName} = ${rhs}; // captured ${step.source} for compare`];
+    }
+    case 'assert_compare': {
+      if (step.relation === 'absent') {
+        // The captured value itself is the selector now: prove no element still
+        // carries it (the regenerating-id case — the old id must be gone).
+        if (step.source === 'attribute' && step.attribute) {
+          return [
+            'await expect(page.locator(`[' + step.attribute + '="${' + step.varName + '}"]`)).toHaveCount(0);',
+          ];
+        }
+        return [`await expect(page.getByText(${step.varName}, { exact: true })).toHaveCount(0);`];
+      }
+      // Poll the after-action read with expect.poll, not a one-shot const read.
+      // A sort or re-render settles asynchronously, so a single read races it and
+      // flakes. expect.poll re-reads until the relation holds or the timeout
+      // expires, the web-first wait Playwright already uses for locators.
+      const rhs = captureReadExpr(step.source, locFirst(step.target), locCount(step.target), step.attribute);
+      const pollOpts = `{ timeout: ${COMPARE_POLL_TIMEOUT_MS} }`;
+      const lines: string[] = [];
+      switch (step.relation) {
+        case 'changed':
+          lines.push(`await expect.poll(async () => ${rhs}, ${pollOpts}).not.toBe(${step.varName}); // value changed after the action`);
+          break;
+        case 'unchanged':
+        case 'equal':
+          lines.push(`await expect.poll(async () => ${rhs}, ${pollOpts}).toBe(${step.varName}); // value held`);
+          if (step.bounds) {
+            const locExpr = locFirst(step.target);
+            lines.push(
+              `const ${step.readVar}Now = Number(${rhs});`,
+              `const ${step.readVar}Min = Number(await ${locExpr}.getAttribute(${q(step.bounds.min)}));`,
+              `const ${step.readVar}Max = Number(await ${locExpr}.getAttribute(${q(step.bounds.max)}));`,
+              `expect(${step.readVar}Now).toBeGreaterThan(${step.readVar}Min);`,
+              `expect(${step.readVar}Now).toBeLessThan(${step.readVar}Max);`,
+            );
+          }
+          break;
+        case 'greater':
+          lines.push(`await expect.poll(async () => Number(${rhs}), ${pollOpts}).toBeGreaterThan(Number(${step.varName}));`);
+          break;
+        case 'less':
+          lines.push(`await expect.poll(async () => Number(${rhs}), ${pollOpts}).toBeLessThan(Number(${step.varName}));`);
+          break;
+      }
+      return lines;
+    }
+    case 'wait_for_state':
+      return [`await ${loc(step.target)}.waitFor({ state: '${step.state}' });`];
   }
 }
 
 function emitAssertion(a: Assertion): string[] {
   switch (a.type) {
-    case 'toBeVisible':
-      return [`await expect(${loc(a.target)}).toBeVisible();`];
-    case 'toHaveText':
-      return [`await expect(${loc(a.target)}).toHaveText(${q(a.text)});`];
-    case 'toContainText':
-      return [`await expect(${loc(a.target)}).toContainText(${q(a.text)});`];
+    case 'toBeVisible': {
+      const opts = a.timeout ? `{ timeout: ${a.timeout} }` : '';
+      return [`await expect(${loc(a.target)}).toBeVisible(${opts});`];
+    }
+    case 'toHaveText': {
+      const opts = a.timeout ? `, { timeout: ${a.timeout} }` : '';
+      return [`await expect(${loc(a.target)}).toHaveText(${q(a.text)}${opts});`];
+    }
+    case 'toContainText': {
+      const opts = a.timeout ? `, { timeout: ${a.timeout} }` : '';
+      return [`await expect(${loc(a.target)}).toContainText(${q(a.text)}${opts});`];
+    }
     case 'toHaveURL':
       return [`await expect(page).toHaveURL(new RegExp(${q(a.pattern)}));`];
-    case 'toHaveCount':
-      return [`await expect(${loc(a.target)}).toHaveCount(${a.count});`];
+    case 'toBeHidden': {
+      // Absence assertion. Force .first() so a selector that matches several
+      // hidden nodes (or none) never trips strict mode. toBeHidden passes both
+      // when the element is hidden and when it matches zero elements.
+      const opts = a.timeout ? `{ timeout: ${a.timeout} }` : '';
+      return [`await expect(${locFirst(a.target)}).toBeHidden(${opts});`];
+    }
+    case 'toHaveCount': {
+      const opts = a.timeout ? `, { timeout: ${a.timeout} }` : '';
+      return [`await expect(${loc(a.target)}).toHaveCount(${a.count}${opts});`];
+    }
+    case 'toHaveAttribute': {
+      const opts = a.timeout ? `, { timeout: ${a.timeout} }` : '';
+      return [`await expect(${loc(a.target)}).toHaveAttribute(${q(a.attribute)}, ${q(a.value)}${opts});`];
+    }
+    case 'toHaveValue': {
+      const opts = a.timeout ? `, { timeout: ${a.timeout} }` : '';
+      return [`await expect(${loc(a.target)}).toHaveValue(${q(a.value)}${opts});`];
+    }
   }
 }
 
 function loc(record: SelectorRecord): string {
-  return emitLocatorCall(record.level, record.arg, record.ambiguous === true);
+  return emitLocatorCall(record.level, record.arg, record.ambiguous === true, record.frameChain);
+}
+
+function locFirst(record: SelectorRecord): string {
+  return emitLocatorCall(record.level, record.arg, true, record.frameChain);
+}
+
+/** Multi-match locator (never .first()) — for count reads. */
+function locCount(record: SelectorRecord): string {
+  return emitLocatorCall(record.level, record.arg, false, record.frameChain);
+}
+
+/** RHS expression that reads a capture/compare value the way `source` says. */
+function captureReadExpr(source: CaptureSource, locExpr: string, locCountExpr: string, attribute?: string): string {
+  if (source === 'count') return `await ${locCountExpr}.count()`;
+  if (source === 'attribute') return `(await ${locExpr}.getAttribute(${q(attribute!)}))?.trim() ?? ''`;
+  return `(await ${locExpr}.textContent())?.trim() ?? ''`;
 }
 
 function emitA11ySpec(url: string, _ext: 'ts' | 'js'): string {
@@ -144,4 +260,17 @@ function titleFromUrl(url: string): string {
 
 function q(s: string): string {
   return JSON.stringify(s);
+}
+
+/** Render the selectOption(...) argument for the recorded match mode. */
+export function selectOptionExpr(by: 'value' | 'label' | 'index' | 'auto', option: string): string {
+  if (by === 'value') return `selectOption({ value: ${JSON.stringify(option)} })`;
+  if (by === 'label') return `selectOption({ label: ${JSON.stringify(option)} })`;
+  if (by === 'index') return `selectOption({ index: ${Number(option)} })`;
+  return `selectOption(${JSON.stringify(option)})`; // 'auto' — value or label
+}
+
+/** Render the setInputFiles(...) argument from recorded paths. */
+export function filesArg(files: string[]): string {
+  return `[${files.map((f) => JSON.stringify(f)).join(', ')}]`;
 }

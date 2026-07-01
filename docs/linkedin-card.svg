@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 627" width="1200" height="627" preserveAspectRatio="xMidYMid meet" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Inter, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#0a0a0e"/>
+      <stop offset="0.55" stop-color="#0e0e14"/>
+      <stop offset="1" stop-color="#15131e"/>
+    </linearGradient>
+
+    <linearGradient id="cardFill" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#16161c"/>
+      <stop offset="1" stop-color="#101015"/>
+    </linearGradient>
+
+    <linearGradient id="violet" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#c4b3ff"/>
+      <stop offset="1" stop-color="#8a7be0"/>
+    </linearGradient>
+
+    <linearGradient id="emerald" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#7ee2b5"/>
+      <stop offset="1" stop-color="#3fb786"/>
+    </linearGradient>
+
+    <radialGradient id="glow" cx="50%" cy="50%" r="50%">
+      <stop offset="0" stop-color="#b9a6ff" stop-opacity="0.25"/>
+      <stop offset="1" stop-color="#b9a6ff" stop-opacity="0"/>
+    </radialGradient>
+
+    <filter id="softShadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur in="SourceAlpha" stdDeviation="6"/>
+      <feOffset dx="0" dy="2"/>
+      <feComponentTransfer><feFuncA type="linear" slope="0.35"/></feComponentTransfer>
+      <feMerge><feMergeNode/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 Z" fill="#5a5a72"/>
+    </marker>
+  </defs>
+
+  <!-- Background -->
+  <rect width="1200" height="627" fill="url(#bg)"/>
+  <ellipse cx="950" cy="120" rx="500" ry="250" fill="url(#glow)"/>
+  <ellipse cx="180" cy="500" rx="380" ry="220" fill="url(#glow)" opacity="0.6"/>
+
+  <!-- Top bar: brand + live pill (kept inside 60px right margin) -->
+  <g transform="translate(60, 56)">
+    <rect width="40" height="40" rx="9" fill="#16161c" stroke="#2a2a34"/>
+    <text x="20" y="27" text-anchor="middle" font-size="22">🧪</text>
+    <text x="56" y="20" fill="#f4f4f8" font-size="18" font-weight="600" letter-spacing="-0.01em">QA-Core</text>
+    <text x="56" y="38" fill="#8a8a9a" font-size="12" letter-spacing="0.04em">AUTONOMOUS QA AGENT</text>
+
+    <g transform="translate(1020, 6)">
+      <rect width="60" height="28" rx="14" fill="#16161c" stroke="#2a2a34"/>
+      <circle cx="14" cy="14" r="4" fill="#5dd5a4"/>
+      <text x="24" y="18" fill="#8aeac0" font-size="11" font-weight="500">LIVE</text>
+    </g>
+  </g>
+
+  <!-- Title (tighter, lower font-size so it fits comfortably) -->
+  <g transform="translate(60, 156)">
+    <text fill="#f6f6fb" font-size="50" font-weight="700" letter-spacing="-0.022em">AI that writes Playwright tests</text>
+    <text y="58" fill="#f6f6fb" font-size="50" font-weight="700" letter-spacing="-0.022em">that <tspan fill="url(#violet)">already passed once</tspan>.</text>
+    <text y="100" fill="#a0a0b0" font-size="18" letter-spacing="-0.005em">Multi-agent pipeline on Claude. Drives a real browser. Reviews its own work.</text>
+  </g>
+
+  <!-- Pipeline (moved up slightly to leave room for stats) -->
+  <g transform="translate(60, 350)" filter="url(#softShadow)">
+    <!-- Node 1: Planner -->
+    <g>
+      <rect width="200" height="92" rx="14" fill="url(#cardFill)" stroke="#2a2a34"/>
+      <circle cx="20" cy="22" r="4" fill="#b9a6ff"/>
+      <text x="32" y="26" fill="#b9a6ff" font-family="ui-monospace, 'SF Mono', Menlo, monospace" font-size="10" letter-spacing="0.04em">PLAN</text>
+      <text x="16" y="56" fill="#f4f4f8" font-size="20" font-weight="600" letter-spacing="-0.015em">Planner</text>
+      <text x="16" y="78" fill="#7c7c8c" font-family="ui-monospace, 'SF Mono', Menlo, monospace" font-size="11">Haiku 4.5</text>
+    </g>
+
+    <line x1="208" y1="46" x2="240" y2="46" stroke="#5a5a72" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <!-- Node 2: Explorer -->
+    <g transform="translate(248, 0)">
+      <rect width="200" height="92" rx="14" fill="url(#cardFill)" stroke="#3a2a64"/>
+      <circle cx="20" cy="22" r="4" fill="#b9a6ff"/>
+      <text x="32" y="26" fill="#b9a6ff" font-family="ui-monospace, 'SF Mono', Menlo, monospace" font-size="10" letter-spacing="0.04em">EXPLORE</text>
+      <text x="16" y="56" fill="#f4f4f8" font-size="20" font-weight="600" letter-spacing="-0.015em">Explorer</text>
+      <text x="16" y="78" fill="#7c7c8c" font-family="ui-monospace, 'SF Mono', Menlo, monospace" font-size="11">Opus 4.7 · tool loop</text>
+    </g>
+
+    <line x1="456" y1="46" x2="488" y2="46" stroke="#5a5a72" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <!-- Node 3: Critic -->
+    <g transform="translate(496, 0)">
+      <rect width="200" height="92" rx="14" fill="url(#cardFill)" stroke="#2a2a34"/>
+      <circle cx="20" cy="22" r="4" fill="#b9a6ff"/>
+      <text x="32" y="26" fill="#b9a6ff" font-family="ui-monospace, 'SF Mono', Menlo, monospace" font-size="10" letter-spacing="0.04em">REVIEW</text>
+      <text x="16" y="56" fill="#f4f4f8" font-size="20" font-weight="600" letter-spacing="-0.015em">Critic</text>
+      <text x="16" y="78" fill="#7c7c8c" font-family="ui-monospace, 'SF Mono', Menlo, monospace" font-size="11">Sonnet 4.6</text>
+    </g>
+
+    <line x1="704" y1="46" x2="736" y2="46" stroke="#5a5a72" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+    <!-- Node 4: Verified Suite (rightmost; right edge at x=944 inside group = absolute 1004) -->
+    <g transform="translate(744, 0)">
+      <rect width="200" height="92" rx="14" fill="url(#cardFill)" stroke="rgba(93, 213, 164, 0.45)"/>
+      <circle cx="20" cy="22" r="4" fill="#5dd5a4"/>
+      <text x="32" y="26" fill="#5dd5a4" font-family="ui-monospace, 'SF Mono', Menlo, monospace" font-size="10" letter-spacing="0.04em">SHIP</text>
+      <text x="16" y="56" fill="#f4f4f8" font-size="20" font-weight="600" letter-spacing="-0.015em">Spec + POM</text>
+      <text x="16" y="78" fill="#7c7c8c" font-family="ui-monospace, 'SF Mono', Menlo, monospace" font-size="11">deterministic emit</text>
+    </g>
+
+    <!-- Healer (dotted, on-demand) - shortened label -->
+    <line x1="844" y1="92" x2="844" y2="118" stroke="#3a3a48" stroke-width="1.5" stroke-dasharray="3 3"/>
+    <g transform="translate(744, 118)">
+      <rect width="200" height="38" rx="10" fill="#101015" stroke="#3a3a48" stroke-dasharray="4 4"/>
+      <circle cx="16" cy="19" r="3.5" fill="#f4c560"/>
+      <text x="28" y="23" fill="#a0a0b0" font-size="12">Healer <tspan fill="#7c7c8c" font-family="ui-monospace, 'SF Mono', Menlo, monospace" font-size="10.5">· on-demand</tspan></text>
+    </g>
+  </g>
+
+  <!-- Stats row (kept inside x:60..1140) -->
+  <g transform="translate(60, 524)">
+    <g>
+      <text fill="url(#violet)" font-size="34" font-weight="700" letter-spacing="-0.02em">63%</text>
+      <text y="22" fill="#7c7c8c" font-size="12" letter-spacing="0.02em">first-run pass-rate</text>
+    </g>
+    <g transform="translate(180, 0)">
+      <text fill="url(#emerald)" font-size="34" font-weight="700" letter-spacing="-0.02em">$0.77</text>
+      <text y="22" fill="#7c7c8c" font-size="12" letter-spacing="0.02em">total agent cost</text>
+    </g>
+    <g transform="translate(360, 0)">
+      <text fill="#f4f4f8" font-size="34" font-weight="700" letter-spacing="-0.02em">5:38</text>
+      <text y="22" fill="#7c7c8c" font-size="12" letter-spacing="0.02em">3 sites · 19 scenarios</text>
+    </g>
+    <g transform="translate(560, 0)">
+      <text fill="#f4f4f8" font-size="34" font-weight="700" letter-spacing="-0.02em">2x</text>
+      <text y="22" fill="#7c7c8c" font-size="12" letter-spacing="0.02em">vs inline (32%)</text>
+    </g>
+
+    <!-- Credit (right-aligned, anchor at x=1080 which is 60px from viewBox right edge at 1140 absolute) -->
+    <g>
+      <text x="1080" y="0" text-anchor="end" fill="#d4d4dc" font-size="14" font-weight="500" letter-spacing="-0.005em">Muhammad Usman</text>
+      <text x="1080" y="22" text-anchor="end" fill="#7c7c8c" font-family="ui-monospace, 'SF Mono', Menlo, monospace" font-size="11">sardarusmanjutt.com</text>
+    </g>
+  </g>
+</svg>

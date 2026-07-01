@@ -1,0 +1,20 @@
+{
+  "$comment": "Project-scoped MCP server config. Claude Code loads this on session start. After editing, RESTART Claude Code so the new servers register. Each server adds tools the agent can call directly (browser drive, screenshot, DOM inspect, shadcn component search). Servers spawn on-demand via npx; first invocation will download the package.",
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["-y", "@playwright/mcp@latest"],
+      "env": {}
+    },
+    "chrome-devtools": {
+      "command": "npx",
+      "args": ["-y", "chrome-devtools-mcp@latest"],
+      "env": {}
+    },
+    "shadcn-ui": {
+      "command": "npx",
+      "args": ["-y", "@jpisnice/shadcn-ui-mcp-server"],
+      "env": {}
+    }
+  }
+}
