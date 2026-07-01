@@ -10,7 +10,7 @@ QA-Core is an autonomous QA agent that drives a real browser, reviews its own wo
 
 Built on:
 
-- **Claude** (via Anthropic SDK) — Opus 4.7 for exploration, Sonnet 4.6 for review/heal/generate, Haiku 4.5 for planning
+- **Claude** (via Anthropic SDK) — Opus 4.7 for exploration, Sonnet 4.6 for review/generate, Haiku 4.5 for planning (selector healing is deterministic, no model)
 - **Playwright** + TypeScript — the test framework and the live browser the agent drives
 - **OpenClaw** — the persona, channel routing, and slash-command layer
 - **MCP** — for native integration in Claude Desktop, Cursor, Cline, etc.
@@ -150,7 +150,6 @@ The Playwright MCP is the canonical "see + interact with the live UI" tool — u
 | `QA_CORE_MODEL_PLANNER` | `claude-haiku-4-5` | Override Planner model. |
 | `QA_CORE_MODEL_EXPLORE` | `claude-opus-4-7` | Override Explorer model. |
 | `QA_CORE_MODEL_CRITIC` | `claude-sonnet-4-6` | Override Critic model. |
-| `QA_CORE_MODEL_HEAL` | `claude-sonnet-4-6` | Override Healer model (used by `/heal`). |
 | `QA_CORE_MODEL_STABILIZER` | `claude-sonnet-4-6` | Override Stabilizer model (Stage 5b — LLM-guided flake recovery). |
 | `QA_CORE_MODEL_TRANSCRIBE` | `claude-sonnet-4-6` | Override `/generate` model. |
 | `QA_CORE_GATEWAY_PORT` | `18789` | WebSocket gateway port. UI defaults to the same. |

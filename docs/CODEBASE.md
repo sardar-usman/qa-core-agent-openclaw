@@ -37,7 +37,7 @@ The 5-stage pipeline lives here. Each stage is one module. Shared types (trace, 
 | `transcriber.ts` | spec output | Deterministic (no LLM) conversion of the verified trace into a single inline Playwright spec file. Emits `beforeEach` that clears cookies + storage. Emits `.first()` only when the cascade marked the record ambiguous. |
 | `pom.ts` | spec output | Same role as `transcriber.ts`, but produces a Page Object Model framework: `pages/BasePage.ts`, one page class per pathname, action-method synthesis for repeated step sequences, dedicated `tests/` directory, and an auto-injected a11y check. The default `/explore` output. |
 | `generate.ts` | story → spec | The `/generate` command. A single LLM call that converts a user story into a Playwright spec marked UNVERIFIED in the file header. Does not drive a browser. |
-| `heal.ts` | spec repair | The `/heal` command. Runs a failing spec with the Playwright JSON reporter, identifies selector-style failures, opens the URL, asks Claude for a replacement selector, validates the proposal resolves to exactly one element, then rewrites the spec to `.healed.<ext>`. |
+| `heal.ts` | spec repair | The `/heal` command. Deterministic, no model. Loads the spec (and its POM page objects), opens the live target page, probes every locator, and re-resolves the broken ones with the same ladder + `healResolve` the Explorer uses. Confirms each heal points at the same intended element, writes the fixes back in place, and reports anything unhealable. |
 | `memory.ts` | persistence | Per-host fingerprints stored under `.qa-core/sites/<host>.json` (cascade stats, known intents, auth hints) plus a global `.qa-core/memory.json`. Renders a cacheable system-prompt block injected by `runtime.ts`. Failures during save log to stderr. |
 | `csv.ts` | utility | Tiny CSV reader and writer used by the `--review` flow (Planner exports `plan.csv`, user edits Approve column, run resumes from the CSV). |
 | `eval-shim.ts` | utility | Installs a no-op `globalThis.__name` shim into every browser context via `addInitScript`. Fixes the `tsx` keepNames helper that breaks `page.evaluate()` serialization. Called from `runtime.ts`, `planner.ts`, `replay.ts`, `heal.ts` immediately after every `browser.newContext()`. |
@@ -52,7 +52,7 @@ Three thin command-line front-ends. Each parses argv, calls the appropriate `src
 |---|---|---|
 | `explore.ts` | `npm run explore -- <url>` | Drives the 5-stage pipeline against a URL. Flags: `--lang ts\|js`, `--name <basename>`, `--out <dir>`, `--review`, `--from-plan <plan.csv>`, `--no-pom`, `--no-replay`, `--no-stability`, `--stability N`. |
 | `generate.ts` | `npm run generate -- "<story>"` | Single-shot story → spec. Flags: `--lang ts\|js`, `--name <basename>`, `--out <dir>`. |
-| `heal.ts` | `npm run heal -- <spec-path>` | Re-resolves broken selectors in a spec against the live page. Writes to `<spec>.healed.<ext>`. |
+| `heal.ts` | `npm run heal -- <spec-path>` | Re-resolves broken selectors in a spec against the live page and writes the fixes back in place. Flags: `--base-url <url>`, `--dry-run`. |
 
 ---
 

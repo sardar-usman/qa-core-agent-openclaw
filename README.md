@@ -31,7 +31,7 @@ QA-Core exposes three commands. Each one solves a different problem in test auto
 | ------- | ---------------- | ----------------- |
 | `npm run explore` | A live URL | A full Playwright suite written from a verified browser session, with a Page Object Model framework |
 | `npm run generate` | A user story or Jira ticket | A Playwright spec built from acceptance criteria. You can run it to verify |
-| `npm run heal` | A spec that broke because the page changed | A patched copy with re-resolved selectors and confidence scores |
+| `npm run heal` | A spec that broke because the page changed | The same spec with its broken selectors re-resolved on the live page, written back in place |
 
 Generated files land under `output/<run-id>/`.
 
@@ -101,7 +101,7 @@ flowchart LR
     R["Reality-Check Replay (zero LLM)"]:::verify
     S["Stability Iteration 3x (zero LLM)"]:::verify
     T["Transcriber + axe-core"]:::stage
-    H["Healer (Sonnet 4.6) on-demand"]:::stage
+    H["Healer (deterministic) on-demand"]:::stage
     SPEC["Spec file (.ts or .js)"]:::io
     CI["CI and GitHub Actions"]:::io
     MEM["Per-host memory"]:::memory
@@ -138,7 +138,11 @@ After each run, the agent saves what it learned about that site to `.qa-core/sit
 
 ### Self-healing
 
-When a spec fails because the page changed, `npm run heal` re-resolves the broken selectors on the live page. Each replacement is verified to resolve to exactly one element before it lands in the patched copy at `<spec>.healed.<ext>`. A comment annotation shows the original call and the model's confidence.
+Healing happens in two places, both deterministic and both reusing the same selector ladder.
+
+During exploration, a selector that fails to resolve is re-resolved automatically. The agent drops the specific hint that failed and re-finds the element by its semantic intent, then continues. Each heal is logged (`healed: <old> re-resolved to <new>`) and recorded in the run report. This is scoped to locators only. An assertion that fails is never healed, because that may be a real bug. After two failed heals on the same selector it is recorded as a finding, not a silent pass.
+
+For an existing spec, `npm run heal -- <spec-path>` opens the live page the spec targets, probes every locator, and re-resolves only the broken ones with that same ladder. It reads the page object too when the spec uses POM. Each re-resolved locator is confirmed to point at the same intended element (its accessible name / text still matches) before it is accepted, so a heal to the wrong element is refused. The repaired files are written back in place and every selector it could not heal is reported. No model call, no spec run.
 
 ### More reference material
 
@@ -251,10 +255,10 @@ This one does not open a browser. It produces code from acceptance criteria. Run
 ### Heal a spec that broke
 
 ```bash
-npm run heal -- output/<run-id>/<name>.spec.ts
+npm run heal -- output/<run-id>/<name>.spec.ts [--base-url https://...] [--dry-run]
 ```
 
-QA-Core runs the spec, finds selector-style failures, opens the URL in a fresh browser, and proposes replacements. Each replacement is verified to resolve to exactly one element before it is written to `<spec>.healed.<ext>`. The patched file includes a comment with the original call and the model's confidence score.
+QA-Core opens the live page the spec targets (from a `page.goto`, a page object's `url`, or `--base-url`) and probes every locator. A locator that still resolves is left untouched. A broken one is re-resolved on the live page with the same locator ladder the Explorer uses, then confirmed to point at the same intended element before it is accepted. When the spec uses POM, the locators inside the imported page object are healed too. The repaired files are written back in place, `--dry-run` previews without writing, and the report names every heal and every selector it could not heal. This is deterministic: no model call and no spec run.
 
 ### Run the suite
 
@@ -311,7 +315,6 @@ Each stage of the pipeline uses a different model so cost stays low and quality 
 | `QA_CORE_MODEL_PLANNER` | `claude-haiku-4-5` | Cheap scenario derivation pre-pass |
 | `QA_CORE_MODEL_EXPLORE` | `claude-opus-4-7` | Browser-driving tool-use loop. Use Opus for hard sites |
 | `QA_CORE_MODEL_CRITIC` | `claude-sonnet-4-6` | Post-run review with per-scenario verdicts |
-| `QA_CORE_MODEL_HEAL` | `claude-sonnet-4-6` | Selector re-resolution in `npm run heal` |
 | `QA_CORE_MODEL_TRANSCRIBE` | `claude-sonnet-4-6` | Story to spec in `npm run generate` |
 | `QA_CORE_MAX_STEPS` | `40` | Hard ceiling on tool calls per `/explore` |
 | `QA_CORE_MAX_USD` | `2.00` | Hard ceiling on cost per run. The agent aborts if exceeded |

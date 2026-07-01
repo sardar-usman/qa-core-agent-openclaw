@@ -42,11 +42,11 @@ QA-Core is an autonomous QA agent that turns three kinds of input into runnable 
 |---|---|---|
 | A live URL | `npm run explore -- <url>` | A Playwright spec generated from a verified browser session |
 | A user story or Jira ticket | `npm run generate -- "<story>"` | A Playwright spec derived from acceptance criteria (unverified) |
-| A spec that broke | `npm run heal -- <spec>` | A patched copy of the spec with re-resolved selectors |
+| A spec that broke | `npm run heal -- <spec>` | The same spec with its broken selectors re-resolved on the live page, written back in place |
 
 It is built on:
 
-- **Claude** (via the Anthropic SDK) — Opus 4.7 for exploration, Sonnet 4.6 for review and healing, Haiku 4.5 for cheap pre-passes
+- **Claude** (via the Anthropic SDK) — Opus 4.7 for exploration, Sonnet 4.6 for review, Haiku 4.5 for cheap pre-passes (selector healing is deterministic, no model)
 - **Playwright** + TypeScript — the test framework + the live browser the agent drives
 - **OpenClaw** — the persona, channel routing, and slash-command layer
 - **MCP** (Model Context Protocol) — for native integration in Claude Desktop, Cursor, Cline, etc.
@@ -64,7 +64,7 @@ The other differentiators:
 - **Per-scenario state isolation** — cookies, localStorage, and sessionStorage are cleared at the start of every scenario. The transcribed spec emits a matching `beforeEach` so tests pass in isolation, not just in the order they were recorded.
 - **Console + network error capture** — every `console.error`, `pageerror`, and 4xx/5xx response during a scenario is attached to the scenario record.
 - **Per-codebase memory** — site fingerprints cached across runs, so repeat runs against the same host are faster, cheaper, and more consistent
-- **Self-healing selectors** — when a spec breaks because the UI changed, the Healer re-resolves the broken calls against the live page
+- **Self-healing selectors** — deterministic, no model. A broken selector is re-resolved on the live page with the same locator ladder, both automatically during exploration and on demand via `npm run heal`
 - **Partitioned accessibility check** — every generated spec ships with an `@axe-core/playwright` check that fails only on `critical` / `serious` WCAG 2 AA violations and logs the rest. (v1's zero-tolerance gate was unshippable in practice.)
 - **Cost budgets** — hard USD ceiling per run, per-stage cost reporting, prompt caching on three blocks
 - **Optional human checkpoint** — `--review` mode exports the Planner's scenario list to a CSV for stakeholder approval before the Explorer runs
@@ -365,26 +365,24 @@ interface ScenarioVerdict {
 
 ---
 
-### Healer (Sonnet 4.6, on-demand)
+### Selector healing (deterministic, on-demand)
 
 **File:** [`src/agent/heal.ts`](../src/agent/heal.ts) · CLI: [`src/cli/heal.ts`](../src/cli/heal.ts)
 
-**Job:** When a generated spec stops working because the page changed, re-resolve the broken selectors against the live page and emit a patched copy.
+**Job:** When a generated spec stops working because the page changed, re-resolve the broken selectors against the live page and write the fixes back. No model call, no spec run.
 
 **Flow:**
-1. Run the spec with the Playwright JSON reporter
-2. Parse the report and extract failures whose error message looks like a selector miss (`element not found`, timeout, count mismatch). Logic failures are left for a human.
-3. For each failure:
-   - Open the test URL in a fresh browser context
-   - Take a DOM snapshot
-   - Ask the heal model for a replacement that matches the original intent
-   - **Verify** the proposal resolves to exactly one element via the cascade
-   - Reject low-confidence proposals (< 0.4)
-4. Write `<spec>.healed.<ext>` with patches inline, each one annotated with the original call and the model's confidence
+1. Load the spec and, when it uses POM, the page-object files it imports (the locators live there, not in the spec)
+2. Find the target URL from `--base-url`, a `page.goto("http…")`, or a page object's `url`, and open it once in a fresh browser context
+3. For each locator in the source:
+   - Rebuild the real Playwright locator and ask the live page `.count()`. A locator that still resolves is left untouched.
+   - A broken one is re-resolved by `healResolve` (the SAME locator ladder the Explorer uses) by the semantic intent the original locator carried
+   - **Refuse** an ambiguous match, and **confirm** the re-resolved element still carries the original identity (accessible name / text / value), so a heal to the wrong element cannot ship
+4. Write the confirmed heals back in place with the shared `emitLocatorCall` emitter (or preview with `--dry-run`), and report every selector it could not heal
 
-**Why this matters:** Without self-healing, every UI change in production means re-running the whole `/explore` pipeline. With it, the suite repairs itself between deploys.
+**Why this matters:** Without self-healing, every UI change in production means re-running the whole `/explore` pipeline. With it, the suite repairs itself between deploys. Because it reuses the exploration ladder, there is one selector engine in the codebase, not two.
 
-**Typical cost:** ~$0.005 per heal · ~30–60s wall clock for the full run
+**Same-element guard:** an unhealable selector (missing element, ambiguous match, or a loose match to a different element) is reported and left unchanged, never silently dropped or wrongly rewritten.
 
 See [section 12](#12-self-healing-workflow) for the full workflow.
 
@@ -557,19 +555,19 @@ The output spec carries an UNVERIFIED header until you run it.
 
 ### 6.3 `npm run heal`
 
-Re-resolve selectors that stopped working.
+Re-resolve selectors that stopped working, against the live page. Deterministic: no model call, no spec run.
 
 ```text
 npm run heal -- <spec-path>
-                [--base-url <url>]            override the URL inside the spec
-                [--report <json>]             use an existing Playwright JSON report instead of re-running
+                [--base-url <url>]            target URL when the spec has no absolute goto
+                [--dry-run]                   report the heals without writing any file
 ```
 
 **Examples:**
 
 ```bash
 npm run heal -- output/20260513-110000-saucedemo/saucedemo.spec.ts
-npm run heal -- output/.../spec.ts --report .heal-report.json
+npm run heal -- output/.../spec.ts --base-url https://staging.example.com --dry-run
 ```
 
 ---
@@ -732,7 +730,6 @@ All configuration is via environment variables. See [`.env.example`](../.env.exa
 | `QA_CORE_MODEL_PLANNER` | `claude-haiku-4-5` |
 | `QA_CORE_MODEL_EXPLORE` | `claude-opus-4-7` |
 | `QA_CORE_MODEL_CRITIC` | `claude-sonnet-4-6` |
-| `QA_CORE_MODEL_HEAL` | `claude-sonnet-4-6` |
 | `QA_CORE_MODEL_TRANSCRIBE` | `claude-sonnet-4-6` *(used by `/generate`)* |
 
 ### Budgets
@@ -795,7 +792,7 @@ Each run writes to `output/<run-id>/`. The run ID format is `<YYYYMMDD>-<HHMMSS>
 
 | File | Format | Purpose |
 |---|---|---|
-| `<spec>.healed.<ext>` | Playwright spec | Patched copy of the original with inline audit annotations |
+| `<spec>` (and any imported page object) | Playwright spec / page object | The original file(s), rewritten in place with broken selectors re-resolved. `--dry-run` writes nothing |
 
 ### From `/eval`
 
@@ -950,54 +947,54 @@ The runtime reads the CSV, filters to rows with `Approve` matching `/^(y|yes|tru
 
 ## 12. Self-healing workflow
 
-When a spec generated last week fails today because the UI changed, `npm run heal` repairs it.
+When a spec generated last week fails today because the UI changed, `npm run heal` repairs it. It never runs the spec and never calls a model: it opens the live page, probes each locator, and re-resolves only the broken ones with the same locator ladder the Explorer uses.
 
 ### Full sequence
 
 ```bash
 # 1. Some time later, the spec starts failing
 npx playwright test output/20260513-104500-saucedemo/saucedemo.spec.ts
-# → 2 tests fail: "Locator: getByTestId('login-button')" not found
+# → 1 test fails: "Locator: getByTestId('login-button')" not found
 
-# 2. Heal
+# 2. Heal (preview first, then write)
+npm run heal -- output/20260513-104500-saucedemo/saucedemo.spec.ts --dry-run
 npm run heal -- output/20260513-104500-saucedemo/saucedemo.spec.ts
 
-# → ✓ 2/2 selectors healed
-# → Wrote output/.../saucedemo.healed.spec.ts
+# → · scanned 6 locator(s) across 2 file(s)
+# → · opened https://www.saucedemo.com/
+# →   ✓ healed → page.getByRole("button", {"name":"Login"})  (level=role, pages/login-page.ts)
+# → Report: 5 intact · 1 healed · 0 unhealable (of 6 scanned)
 
-# 3. Diff, review, and run
-diff output/.../saucedemo.spec.ts output/.../saucedemo.healed.spec.ts
-npx playwright test output/.../saucedemo.healed.spec.ts
+# 3. Run
+npx playwright test output/20260513-104500-saucedemo/saucedemo.spec.ts
 ```
 
-### What the patched spec looks like
+### How a locator is healed
 
-The patched calls have inline comments showing the original call:
+For each locator, the healer:
 
-```typescript
-await /* qa-core: healed (was page.getByTestId("login-button")) */
-  page.getByRole("button", { name: "Login" }).click();
-```
+1. Rebuilds the real Playwright locator and asks the live page `.count()`. If it still resolves, it is left untouched.
+2. If it resolves to nothing, it re-resolves the element by the semantic intent the original locator carried (role name, label, placeholder, text, alt, title, testid, or a token from a CSS id/class) through the same ladder the Explorer uses.
+3. Confirms the re-resolved element is the SAME intended element: its accessible name / text / value must still carry the original identity. An ambiguous match, or a loose match to a different element, is refused.
+4. Writes the confirmed heal back in place with the shared emitter. When the spec uses POM, the fix lands in the imported page-object file, not the spec.
 
-You decide whether to merge the heal back to the original or keep the `.healed.spec.ts` file separate.
+### What gets reported as unhealable
 
-### Confidence scoring
-
-Every heal proposal carries a confidence in 0..1. The runtime rejects anything below 0.4. The CLI prints the confidence per heal so you can prioritize review:
+A broken selector that cannot be safely repaired is reported and left unchanged, never wrongly rewritten:
 
 ```text
-✓ page.getByTestId("login-button")
-  → page.getByRole("button", { name: "Login" })
-  level=role  confidence=0.95
+✗ unhealable: page.getByRole("textbox", {"name":"Email"})
+    re-resolved to a different element, not healing (would be wrong)
 ```
+
+Reasons include: the element is no longer on the page (`could not be re-resolved`), several elements match the intent (`ambiguous`), the only match is a different element (`re-resolved to a different element`), or the selector had no semantic identity to re-resolve by (a nameless role or opaque CSS/xpath).
 
 ### What it does NOT heal
 
-- **Logic failures** (wrong text, wrong URL) — those need a human; the spec's intent has drifted
-- **Network failures** — the heal flow re-runs the spec, so transient flakiness will be retried but not specifically healed
-- **Cascading element changes** — if the entire page redesigned, the heal proposals may not exist
+- **Logic failures** (wrong text, wrong URL) — those need a human; the spec's intent has drifted. Healing is scoped to locators only.
+- **Selectors with no semantic identity** — a pure testid or opaque CSS with no relation to visible text cannot be re-found by intent, so it is reported unhealable rather than guessed.
 
-The runtime errs on the side of NOT healing (rejecting the proposal) rather than emitting a low-confidence patch.
+The healer errs on the side of NOT healing (reporting it) rather than writing a heal it cannot confirm.
 
 ---
 
@@ -1399,7 +1396,7 @@ qa-core-agent/
 │   │   ├── transcriber.ts                # inline spec emission (deterministic)
 │   │   ├── pom.ts                        # POM framework emission (default, deterministic)
 │   │   ├── trace.ts                      # type definitions
-│   │   ├── heal.ts                       # /heal — selector self-healing (Sonnet)
+│   │   ├── heal.ts                       # /heal — selector self-healing (deterministic)
 │   │   ├── generate.ts                   # /generate — single-shot story → spec
 │   │   ├── memory.ts                     # per-host fingerprints + project aggregate
 │   │   ├── eval-shim.ts                  # __name no-op shim for every browser context
@@ -1479,7 +1476,7 @@ qa-core-agent/
 - ✓ **Robust `page.evaluate`** — `__name` shim installed in every browser context (fixes tsx keepNames bug)
 - ✓ **Seven regression-protection smoke tests** — every v2 fix is locked in by a test
 - ✓ Per-host memory with intent reuse
-- ✓ Self-healing selectors with confidence scoring
+- ✓ Deterministic self-healing selectors — re-resolved live with the exploration ladder, automatically during a run and on demand via `npm run heal`
 - ✓ Cost budgets + prompt caching (3 cached blocks)
 - ✓ Review-mode CSV checkpoint (`--review` / `--from-plan`)
 - ✓ CLI + Web UI + WebSocket gateway + MCP server + GitHub Actions

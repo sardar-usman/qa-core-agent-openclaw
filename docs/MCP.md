@@ -75,7 +75,7 @@ Open the Cline panel → MCP Servers → Edit configuration. Same JSON shape as 
 |---|---|---|
 | `qa_explore` | Drive a real browser through a URL, run the 3-stage pipeline, return a Playwright spec generated from the verified session. | 30–120s |
 | `qa_generate` | Single-shot user-story → spec. Faster but UNVERIFIED — must be run before trusting. | 5–15s |
-| `qa_heal` | Run an existing spec, find selector-style failures, re-resolve against the live page, return a patched spec. | 30–60s |
+| `qa_heal` | Open the live page an existing spec targets, probe every locator, and re-resolve the broken ones against it (same ladder as exploration, same-element confirmed). Writes fixes back, reports the rest. Deterministic — no model. | 15–40s |
 
 ## Resources the server exposes
 
@@ -109,7 +109,6 @@ All optional except `ANTHROPIC_API_KEY`. Sensible defaults are baked in.
 | `QA_CORE_MODEL_PLANNER` | `claude-haiku-4-5` | Override the Planner's model |
 | `QA_CORE_MODEL_EXPLORE` | `claude-opus-4-7` | Override the Explorer's model |
 | `QA_CORE_MODEL_CRITIC` | `claude-sonnet-4-6` | Override the Critic's model |
-| `QA_CORE_MODEL_HEAL` | `claude-sonnet-4-6` | Override the Healer's model |
 | `QA_CORE_MODEL_TRANSCRIBE` | `claude-sonnet-4-6` | Override the model used by `qa_generate` |
 | `QA_CORE_MAX_STEPS` | `40` | Hard ceiling on tool calls per `qa_explore` |
 | `QA_CORE_MAX_USD` | `2.00` | Hard ceiling on cost per `qa_explore` run |
