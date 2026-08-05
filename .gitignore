@@ -41,7 +41,6 @@ coverage/
 .nyc_output/
 
 # OS
-.DS_Store
 Thumbs.db
 ehthumbs.db
 Desktop.ini
@@ -56,3 +55,7 @@ Desktop.ini
 
 # Local OpenClaw secrets (config.json itself is checked in)
 .openclaw/secrets/
+
+.DS_Store
+repomix-output.xml
+packages/
