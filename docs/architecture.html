@@ -1,0 +1,737 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>QA-Core — Architecture</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Geist:wght@200;300;400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg-0: #08080a;
+    --bg-1: #0d0d10;
+    --bg-2: #131318;
+    --bg-3: #1a1a22;
+    --bg-4: #25252f;
+    --line: rgba(255, 255, 255, 0.055);
+    --line-strong: rgba(255, 255, 255, 0.09);
+    --line-soft: rgba(255, 255, 255, 0.03);
+    --accent: #b9a6ff;
+    --accent-2: #8b6dff;
+    --accent-soft: rgba(185, 166, 255, 0.09);
+    --accent-line: rgba(185, 166, 255, 0.18);
+    --emerald: #5dd5a4;
+    --amber: #f4c560;
+    --rose: #ef7c8d;
+    --cyan: #7dd3e8;
+    --emerald-soft: rgba(93, 213, 164, 0.09);
+    --amber-soft: rgba(244, 197, 96, 0.09);
+    --rose-soft: rgba(239, 124, 141, 0.09);
+    --cyan-soft: rgba(125, 211, 232, 0.09);
+    --text: #f5f5f7;
+    --text-2: #9d9da7;
+    --text-3: #5b5b66;
+    --sans: 'Geist', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+    --mono: 'Geist Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+    --ease: cubic-bezier(0.16, 1, 0.3, 1);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { min-height: 100%; }
+
+  body {
+    background: var(--bg-0);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+    letter-spacing: -0.005em;
+    padding: 56px 28px 96px;
+    position: relative;
+    overflow-x: hidden;
+  }
+
+  body::before {
+    content: '';
+    position: fixed;
+    inset: -10%;
+    background:
+      radial-gradient(45% 35% at 25% 10%, rgba(139, 109, 255, 0.14) 0%, transparent 60%),
+      radial-gradient(35% 30% at 80% 90%, rgba(185, 166, 255, 0.10) 0%, transparent 60%);
+    filter: blur(48px);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  body::after {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image:
+      linear-gradient(rgba(255,255,255,0.014) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,0.014) 1px, transparent 1px);
+    background-size: 56px 56px;
+    mask-image: radial-gradient(ellipse at center, black 30%, transparent 80%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  .page { max-width: 1200px; margin: 0 auto; position: relative; z-index: 1; }
+
+  /* Header */
+  .header {
+    text-align: center;
+    margin-bottom: 64px;
+  }
+
+  .eyebrow {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-family: var(--sans);
+    font-size: 11px;
+    color: var(--text-2);
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+    margin-bottom: 24px;
+    font-weight: 500;
+    padding: 5px 14px 5px 10px;
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+  }
+
+  .eyebrow .pulse {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--accent);
+    box-shadow: 0 0 8px var(--accent);
+    animation: pulse 2.4s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(0.85); }
+  }
+
+  h1 {
+    font-size: clamp(40px, 5.5vw, 64px);
+    font-weight: 300;
+    line-height: 1.04;
+    letter-spacing: -0.04em;
+    margin-bottom: 18px;
+  }
+
+  h1 em {
+    font-style: normal;
+    color: var(--accent);
+    font-weight: 300;
+  }
+
+  .subhead {
+    color: var(--text-2);
+    font-size: 17px;
+    max-width: 660px;
+    margin: 0 auto;
+    line-height: 1.55;
+  }
+
+  /* Section header */
+  .section-label {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin: 64px 0 24px;
+    font-family: var(--sans);
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-3);
+    letter-spacing: 0.16em;
+    text-transform: uppercase;
+  }
+
+  .section-label::before,
+  .section-label::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: linear-gradient(90deg, transparent, var(--line-strong), transparent);
+  }
+
+  /* What it does */
+  .commands {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+    margin-bottom: 16px;
+  }
+
+  .cmd {
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 22px 20px;
+    transition: border-color 0.3s var(--ease);
+  }
+
+  .cmd:hover { border-color: var(--accent-line); }
+
+  .cmd-tag {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--text-2);
+    background: var(--bg-3);
+    border: 1px solid var(--line);
+    padding: 3px 9px;
+    border-radius: 6px;
+    margin-bottom: 14px;
+  }
+
+  .cmd-title {
+    font-size: 15px;
+    font-weight: 500;
+    margin-bottom: 6px;
+    letter-spacing: -0.012em;
+  }
+
+  .cmd-desc {
+    font-size: 13px;
+    color: var(--text-2);
+    line-height: 1.5;
+  }
+
+  /* Pipeline */
+  .pipeline {
+    display: grid;
+    grid-template-columns: 240px 1fr 280px;
+    gap: 22px;
+    align-items: stretch;
+  }
+
+  .sidebar {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .side-card {
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 18px;
+    position: relative;
+    overflow: hidden;
+  }
+
+  .side-card::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at 30% 0%, var(--accent-soft) 0%, transparent 60%);
+    opacity: 0.5;
+    pointer-events: none;
+  }
+
+  .side-card > * { position: relative; }
+
+  .side-icon {
+    width: 32px;
+    height: 32px;
+    border-radius: 9px;
+    background: var(--bg-3);
+    border: 1px solid var(--line-strong);
+    color: var(--accent);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 14px;
+  }
+
+  .side-icon svg { width: 16px; height: 16px; }
+
+  .side-title {
+    font-size: 13px;
+    font-weight: 500;
+    margin-bottom: 4px;
+    letter-spacing: -0.01em;
+  }
+
+  .side-desc {
+    font-size: 12px;
+    color: var(--text-2);
+    line-height: 1.5;
+  }
+
+  /* Stages */
+  .stages {
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .stage {
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 20px 22px;
+    display: grid;
+    grid-template-columns: 40px 1fr auto;
+    gap: 20px;
+    align-items: center;
+    position: relative;
+    overflow: hidden;
+    transition: border-color 0.3s var(--ease);
+  }
+
+  .stage::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at 0% 50%, var(--accent-soft) 0%, transparent 50%);
+    opacity: 0.4;
+    pointer-events: none;
+  }
+
+  .stage:hover { border-color: var(--accent-line); }
+  .stage > * { position: relative; }
+
+  .stage-num {
+    width: 40px;
+    height: 40px;
+    border-radius: 12px;
+    background: var(--bg-3);
+    border: 1px solid var(--accent-line);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-family: var(--mono);
+    font-size: 14px;
+    color: var(--accent);
+    font-weight: 500;
+  }
+
+  .stage-body { min-width: 0; }
+
+  .stage-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 6px;
+  }
+
+  .stage-name {
+    font-size: 15.5px;
+    font-weight: 500;
+    letter-spacing: -0.015em;
+  }
+
+  .stage-model {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--accent);
+    background: var(--accent-soft);
+    border: 1px solid var(--accent-line);
+    padding: 2px 8px;
+    border-radius: 999px;
+  }
+
+  .stage-desc {
+    font-size: 13px;
+    color: var(--text-2);
+    line-height: 1.5;
+  }
+
+  .stage-meta {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    color: var(--text-3);
+    text-align: right;
+    white-space: nowrap;
+  }
+
+  .stage-output {
+    margin-top: 10px;
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--text-3);
+  }
+
+  .stage-output span {
+    color: var(--cyan);
+  }
+
+  /* Optional checkpoint variant */
+  .stage.optional {
+    border-style: dashed;
+    background: transparent;
+  }
+
+  .stage.optional .stage-num {
+    background: transparent;
+    color: var(--amber);
+    border-color: rgba(244, 197, 96, 0.3);
+  }
+
+  .stage.optional .stage-model {
+    color: var(--amber);
+    background: var(--amber-soft);
+    border-color: rgba(244, 197, 96, 0.25);
+  }
+
+  /* Outcome row */
+  .outcome {
+    margin-top: 28px;
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px 14px;
+    justify-content: center;
+    padding: 24px;
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+  }
+
+  .outcome-step {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text-2);
+    padding: 5px 12px;
+    background: var(--bg-2);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+  }
+
+  .outcome-arrow {
+    color: var(--text-3);
+    font-family: var(--mono);
+  }
+
+  /* Tech stack + Why it matters */
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+
+  .panel {
+    background: var(--bg-1);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 24px 22px;
+  }
+
+  .panel-title {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text);
+    margin-bottom: 18px;
+    letter-spacing: -0.01em;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .panel-title svg {
+    width: 16px;
+    height: 16px;
+    color: var(--accent);
+  }
+
+  .panel ul {
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 11px;
+  }
+
+  .panel li {
+    font-size: 13px;
+    color: var(--text-2);
+    padding-left: 22px;
+    position: relative;
+    line-height: 1.55;
+  }
+
+  .panel li::before {
+    content: '';
+    position: absolute;
+    left: 0; top: 8px;
+    width: 12px;
+    height: 1px;
+    background: var(--accent);
+    opacity: 0.6;
+  }
+
+  .panel li strong {
+    color: var(--text);
+    font-weight: 500;
+  }
+
+  /* Footer */
+  .footer {
+    margin-top: 72px;
+    text-align: center;
+    color: var(--text-3);
+    font-size: 12.5px;
+  }
+
+  .footer a {
+    color: var(--text-2);
+    text-decoration: none;
+    border-bottom: 1px solid var(--line-strong);
+  }
+
+  .footer a:hover { color: var(--accent); border-bottom-color: var(--accent-line); }
+
+  @media (max-width: 1020px) {
+    .pipeline { grid-template-columns: 1fr; }
+    .sidebar { flex-direction: row; flex-wrap: wrap; }
+    .sidebar .side-card { flex: 1 1 240px; }
+    .commands { grid-template-columns: 1fr; }
+    .two-col { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div class="page">
+
+  <!-- Header -->
+  <header class="header">
+    <div class="eyebrow"><span class="pulse"></span> QA-Core · v0.2 · Architecture</div>
+    <h1>From Manual QA → <em>Agentic Test Generation</em></h1>
+    <p class="subhead">A multi-agent pipeline that drives a real browser, reviews its own work, and writes Playwright tests that have already passed once — before they leave the agent.</p>
+  </header>
+
+  <!-- What it does -->
+  <div class="section-label">What it does</div>
+  <div class="commands">
+    <div class="cmd">
+      <div class="cmd-tag">/explore &lt;url&gt;</div>
+      <div class="cmd-title">Live exploration</div>
+      <div class="cmd-desc">Drive a real Chromium browser through a URL, transcribe the verified session as a Playwright spec.</div>
+    </div>
+    <div class="cmd">
+      <div class="cmd-tag">/generate &lt;story&gt;</div>
+      <div class="cmd-title">Story to spec</div>
+      <div class="cmd-desc">Single-shot generation from a user story or Jira ticket. Marked UNVERIFIED until executed.</div>
+    </div>
+    <div class="cmd">
+      <div class="cmd-tag">/heal &lt;spec&gt;</div>
+      <div class="cmd-title">Self-healing</div>
+      <div class="cmd-desc">Re-resolve selectors that broke against the live page with the same ladder as exploration. Each heal is confirmed to point at the same element. Deterministic, no model.</div>
+    </div>
+  </div>
+
+  <!-- Pipeline -->
+  <div class="section-label">The pipeline</div>
+  <div class="pipeline">
+
+    <!-- Left sidebar: cross-cutting concerns -->
+    <div class="sidebar">
+      <div class="side-card">
+        <div class="side-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M3 5v14a9 3 0 0 0 18 0V5"/><path d="M3 12a9 3 0 0 0 18 0"/>
+          </svg>
+        </div>
+        <div class="side-title">Per-host memory</div>
+        <div class="side-desc">Cached fingerprints under <span style="font-family: var(--mono); color: var(--accent);">.qa-core/sites/</span> — observed intents, auth hints, cascade stats. Repeat runs reuse the cache.</div>
+      </div>
+
+      <div class="side-card">
+        <div class="side-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2v20"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/>
+          </svg>
+        </div>
+        <div class="side-title">Cost budgets</div>
+        <div class="side-desc">Hard USD ceiling per run with per-stage tracking. Prompt caching on three system blocks (rules + memory + plan).</div>
+      </div>
+
+      <div class="side-card">
+        <div class="side-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+          </svg>
+        </div>
+        <div class="side-title">Selector cascade</div>
+        <div class="side-desc"><span style="font-family: var(--mono); color: var(--accent);">getByRole</span> → label → testid → CSS. Cascade level tracked per assertion and reported to the Critic.</div>
+      </div>
+    </div>
+
+    <!-- Center: stages -->
+    <div class="stages">
+      <div class="stage">
+        <div class="stage-num">1</div>
+        <div class="stage-body">
+          <div class="stage-title">
+            <span class="stage-name">Planner</span>
+            <span class="stage-model">Haiku 4.5</span>
+          </div>
+          <div class="stage-desc">One DOM snapshot of the URL → numbered scenario list with categories and rationales.</div>
+          <div class="stage-output">→ <span>scenarios: happy / negative / edge / a11y</span></div>
+        </div>
+        <div class="stage-meta">~$0.001<br>~3s</div>
+      </div>
+
+      <div class="stage optional">
+        <div class="stage-num">●</div>
+        <div class="stage-body">
+          <div class="stage-title">
+            <span class="stage-name">Review checkpoint</span>
+            <span class="stage-model">optional · --review</span>
+          </div>
+          <div class="stage-desc">Export the scenario list to <code style="font-family: var(--mono); font-size: 11.5px;">plan.csv</code> and pause. Stakeholders set Approve=no to skip rows; resume with <code style="font-family: var(--mono); font-size: 11.5px;">--from-plan</code>.</div>
+          <div class="stage-output">→ <span>plan.csv (Excel-readable)</span></div>
+        </div>
+        <div class="stage-meta">human<br>in the loop</div>
+      </div>
+
+      <div class="stage">
+        <div class="stage-num">2</div>
+        <div class="stage-body">
+          <div class="stage-title">
+            <span class="stage-name">Explorer</span>
+            <span class="stage-model">Opus 4.7</span>
+          </div>
+          <div class="stage-desc">Tool-use loop driving Playwright <strong style="color: var(--text);">live</strong> — navigate, click, fill, assert. Every step verified against the real page before the next is taken.</div>
+          <div class="stage-output">→ <span>verified trace · cascade stats · screenshots on failure</span></div>
+        </div>
+        <div class="stage-meta">~$0.02–0.10<br>~30–90s</div>
+      </div>
+
+      <div class="stage">
+        <div class="stage-num">3</div>
+        <div class="stage-body">
+          <div class="stage-title">
+            <span class="stage-name">Critic</span>
+            <span class="stage-model">Sonnet 4.6</span>
+          </div>
+          <div class="stage-desc">Reviews the trace, returns per-scenario verdicts (<strong style="color: var(--emerald);">ship</strong> / <strong style="color: var(--amber);">weak</strong> / <strong style="color: var(--rose);">fix</strong>) with reasons. Non-ship verdicts surface in CLI and the run report.</div>
+          <div class="stage-output">→ <span>verdicts.json · review summary</span></div>
+        </div>
+        <div class="stage-meta">~$0.005<br>~5s</div>
+      </div>
+
+      <div class="stage">
+        <div class="stage-num">4</div>
+        <div class="stage-body">
+          <div class="stage-title">
+            <span class="stage-name">Transcriber</span>
+            <span class="stage-model">deterministic</span>
+          </div>
+          <div class="stage-desc">Verified trace → Playwright spec in JS or TS. Selectors emitted at their cascade-resolved level. Every spec auto-injects an <code style="font-family: var(--mono); font-size: 11.5px;">@axe-core/playwright</code> a11y check.</div>
+          <div class="stage-output">→ <span>output/&lt;run-id&gt;/&lt;name&gt;.spec.{ts,js}</span></div>
+        </div>
+        <div class="stage-meta">no LLM<br>&lt;1s</div>
+      </div>
+
+      <div class="stage">
+        <div class="stage-num">5</div>
+        <div class="stage-body">
+          <div class="stage-title">
+            <span class="stage-name">Healer</span>
+            <span class="stage-model">deterministic · on-demand</span>
+          </div>
+          <div class="stage-desc">Opens the live page, probes every locator, and re-resolves the broken ones with the same ladder as exploration. Each heal is confirmed to point at the same element, only then applied.</div>
+          <div class="stage-output">→ <span>the spec (and its page objects) repaired in place; unhealable selectors reported</span></div>
+        </div>
+        <div class="stage-meta">$0<br>no model</div>
+      </div>
+    </div>
+
+    <!-- Right sidebar: I/O -->
+    <div class="sidebar">
+      <div class="side-card">
+        <div class="side-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M9 21V9"/>
+          </svg>
+        </div>
+        <div class="side-title">Four interfaces</div>
+        <div class="side-desc"><strong>CLI</strong> for engineers · <strong>Web UI</strong> (chat-style) via the OpenClaw gateway · <strong>MCP server</strong> for Claude Desktop / Cursor / Cline · <strong>GitHub Actions</strong> for CI.</div>
+      </div>
+
+      <div class="side-card">
+        <div class="side-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/>
+          </svg>
+        </div>
+        <div class="side-title">Verified by execution</div>
+        <div class="side-desc">Generated tests have already passed once during exploration. The Self-play replay in CI guarantees they pass on a fresh context too.</div>
+      </div>
+
+      <div class="side-card">
+        <div class="side-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 17a4 4 0 1 0 0-8 4 4 0 0 0 0 8z"/><path d="m21 21-3-3"/>
+          </svg>
+        </div>
+        <div class="side-title">Eval harness</div>
+        <div class="side-desc">Run <code style="font-family: var(--mono); color: var(--accent);">npm run eval</code> to benchmark across public test sites. Real numbers — pass-rate, flake-rate, cost — populate the README.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Outcome -->
+  <div class="outcome">
+    <div class="outcome-step">URL</div>
+    <div class="outcome-arrow">→</div>
+    <div class="outcome-step">Plan</div>
+    <div class="outcome-arrow">→</div>
+    <div class="outcome-step">Review (optional)</div>
+    <div class="outcome-arrow">→</div>
+    <div class="outcome-step">Live exploration</div>
+    <div class="outcome-arrow">→</div>
+    <div class="outcome-step">Critic verdicts</div>
+    <div class="outcome-arrow">→</div>
+    <div class="outcome-step">Playwright spec</div>
+    <div class="outcome-arrow">→</div>
+    <div class="outcome-step">CI run</div>
+  </div>
+
+  <!-- Tech stack + Why -->
+  <div class="section-label">Stack & rationale</div>
+  <div class="two-col">
+    <div class="panel">
+      <div class="panel-title">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+        Stack
+      </div>
+      <ul>
+        <li><strong>Claude</strong> via the Anthropic SDK — tool use, prompt caching, model routing across Opus / Sonnet / Haiku.</li>
+        <li><strong>Playwright</strong> + TypeScript — Chromium / Firefox / WebKit / mobile projects, retries, traces.</li>
+        <li><strong>axe-core</strong> for a11y assertions auto-injected on every spec.</li>
+        <li><strong>OpenClaw</strong> as the channel layer (web UI, Telegram, slash-command routing, persona).</li>
+        <li><strong>GitHub Actions</strong> running generated specs on every PR.</li>
+      </ul>
+    </div>
+    <div class="panel">
+      <div class="panel-title">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+        Why it matters
+      </div>
+      <ul>
+        <li><strong>Verified tests, not generated tests.</strong> Every action in the spec ran live in a browser before transcription.</li>
+        <li><strong>Self-healing keeps suites alive.</strong> When the UI changes, the agent repairs broken selectors and proposes the diff for review.</li>
+        <li><strong>Memory compounds.</strong> Per-host fingerprints + prompt caching mean repeat runs are faster, cheaper, and more consistent.</li>
+        <li><strong>Stakeholder-friendly.</strong> Optional CSV review checkpoint lets QA leads filter scenarios before the Explorer runs.</li>
+        <li><strong>Measurable.</strong> Real eval numbers (pass-rate, flake-rate, cost-per-test) replace marketing claims.</li>
+      </ul>
+    </div>
+  </div>
+
+  <footer class="footer">
+    QA-Core · Built by Muhammad Usman · <a href="https://sardarusmanjutt.com">sardarusmanjutt.com</a>
+  </footer>
+
+</div>
+</body>
+</html>
