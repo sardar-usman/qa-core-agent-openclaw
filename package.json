@@ -2,7 +2,25 @@
   "name": "qa-core-agent",
   "version": "0.2.0",
   "private": true,
-  "description": "Autonomous QA agent — generates Playwright test suites from URLs, user stories, and PR diffs using an agentic tool-use loop on Claude.",
+  "description": "Autonomous QA agent that generates Playwright test suites from URLs, user stories, and PR diffs using an agentic tool-use loop on Claude.",
+  "license": "MIT",
+  "author": "Muhammad Usman",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sardar-usman/qa-core-agent.git"
+  },
+  "homepage": "https://github.com/sardar-usman/qa-core-agent",
+  "bugs": {
+    "url": "https://github.com/sardar-usman/qa-core-agent/issues"
+  },
+  "keywords": [
+    "playwright",
+    "test-automation",
+    "ai-agent",
+    "qa",
+    "e2e-testing",
+    "typescript"
+  ],
   "type": "module",
   "engines": {
     "node": ">=20"
