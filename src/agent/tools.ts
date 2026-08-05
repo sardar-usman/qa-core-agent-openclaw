@@ -1,6 +1,10 @@
 import type { Page } from '@playwright/test';
 import { expect } from '@playwright/test';
 import { resolve, parsePiercingSelector, type CascadeLevel, escapeRegex } from './selectors.js';
+import { healResolve, type ResolveInput } from './heal-resolve.js';
+// Re-exported for back-compat: the MCP and gateway wrappers import these from
+// tools.ts. New code should import from heal-resolve.ts directly.
+export { healResolve, type ResolveInput };
 import type { Assertion, Scenario, SelectorRecord, TraceStep, CaptureSource, CompareRelation } from './trace.js';
 import { baseLocator } from './replay.js';
 import { detectUniqueField, generateUnique } from './unique-data.js';
@@ -540,8 +544,6 @@ function pushStep(ctx: ToolContext, step: TraceStep): void {
   ctx.current.steps.push(step);
 }
 
-export type ResolveInput = { intent: string; role?: string; label?: string; testid?: string; css?: string; text?: string };
-
 async function resolveAndRecord(
   ctx: ToolContext,
   input: ResolveInput,
@@ -653,25 +655,6 @@ async function healOrFinding(
     `This is now the recorded result for this scenario. Do NOT retry that selector. Call begin_scenario ` +
     `for a DIFFERENT planned scenario, or finish() if none remain.`,
   );
-}
-
-/**
- * Re-resolve a failed selector against the live page using the SAME locator
- * ladder, but by the semantic intent only (the brittle hint that failed is
- * dropped). Polls briefly so a slow element still gets a second chance. Returns
- * the healed locator, or null when the element truly is not there.
- */
-export async function healResolve(
-  page: Page,
-  input: ResolveInput,
-): Promise<import('./selectors.js').ResolvedLocator | null> {
-  const relaxed: ResolveInput = { intent: input.intent };
-  let r = await resolve(page, relaxed);
-  for (let i = 0; i < 3 && !r; i++) {
-    await new Promise((res) => setTimeout(res, 200));
-    r = await resolve(page, relaxed);
-  }
-  return r;
 }
 
 /** Stable signature of the selector the model asked for, for heal-attempt counting. */

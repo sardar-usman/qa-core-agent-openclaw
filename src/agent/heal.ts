@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { chromium, type Browser, type Page, type FrameLocator } from 'playwright';
 import { emitLocatorCall, type CascadeLevel, type Scope } from './selectors.js';
-import { healResolve } from './tools.js';
+import { healResolve } from './heal-resolve.js';
 import { installEvalShim } from './eval-shim.js';
 
 /**
