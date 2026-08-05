@@ -154,7 +154,7 @@ For an existing spec, `npm run heal -- <spec-path>` opens the live page the spec
 ## Quick start
 
 ```bash
-git clone https://github.com/sardarusmanjutt/qa-core-agent.git
+git clone https://github.com/sardar-usman/qa-core-agent.git
 cd qa-core-agent
 cp .env.example .env          # then add your ANTHROPIC_API_KEY
 bash setup.sh                 # installs dependencies and Playwright Chromium
