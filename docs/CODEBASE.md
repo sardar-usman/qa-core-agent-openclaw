@@ -37,10 +37,10 @@ The 5-stage pipeline lives here. Each stage is one module. Shared types (trace, 
 | `transcriber.ts` | spec output | Deterministic (no LLM) conversion of the verified trace into a single inline Playwright spec file. Emits `beforeEach` that clears cookies + storage. Emits `.first()` only when the cascade marked the record ambiguous. |
 | `pom.ts` | spec output | Same role as `transcriber.ts`, but produces a Page Object Model framework: `pages/BasePage.ts`, one page class per pathname, action-method synthesis for repeated step sequences, dedicated `tests/` directory, and an auto-injected a11y check. The default `/explore` output. |
 | `generate.ts` | story → spec | The `/generate` command. A single LLM call that converts a user story into a Playwright spec marked UNVERIFIED in the file header. Does not drive a browser. |
-| `heal.ts` | spec repair | The `/heal` command. Deterministic, no model. Loads the spec (and its POM page objects), opens the live target page, probes every locator, and re-resolves the broken ones with the same ladder + `healResolve` the Explorer uses. Confirms each heal points at the same intended element, writes the fixes back in place, and reports anything unhealable. |
+| `selector-recovery.ts` | shared | In-run selector recovery (NOT the healer, which is the qa-core-heal package). `recoverResolve()` re-resolves a selector that failed during exploration by its semantic intent alone, dropping the stale hint that suppressed the ladder's match. Called from `resolveAndRecord` in `tools.ts`; each recovery is recorded on `ctx.heals` and surfaced as a `heal` event. Locked by `smoke-selector-recovery.ts`. |
 | `memory.ts` | persistence | Per-host fingerprints stored under `.qa-core/sites/<host>.json` (cascade stats, known intents, auth hints) plus a global `.qa-core/memory.json`. Renders a cacheable system-prompt block injected by `runtime.ts`. Failures during save log to stderr. |
 | `csv.ts` | utility | Tiny CSV reader and writer used by the `--review` flow (Planner exports `plan.csv`, user edits Approve column, run resumes from the CSV). |
-| `eval-shim.ts` | utility | Installs a no-op `globalThis.__name` shim into every browser context via `addInitScript`. Fixes the `tsx` keepNames helper that breaks `page.evaluate()` serialization. Called from `runtime.ts`, `planner.ts`, `replay.ts`, `heal.ts` immediately after every `browser.newContext()`. |
+| `eval-shim.ts` | utility | Installs a no-op `globalThis.__name` shim into every browser context via `addInitScript`. Fixes the `tsx` keepNames helper that breaks `page.evaluate()` serialization. Called from `runtime.ts`, `planner.ts`, `replay.ts` immediately after every `browser.newContext()`. |
 
 ---
 
@@ -52,7 +52,7 @@ Three thin command-line front-ends. Each parses argv, calls the appropriate `src
 |---|---|---|
 | `explore.ts` | `npm run explore -- <url>` | Drives the 5-stage pipeline against a URL. Flags: `--lang ts\|js`, `--name <basename>`, `--out <dir>`, `--review`, `--from-plan <plan.csv>`, `--no-pom`, `--no-replay`, `--no-stability`, `--stability N`. |
 | `generate.ts` | `npm run generate -- "<story>"` | Single-shot story → spec. Flags: `--lang ts\|js`, `--name <basename>`, `--out <dir>`. |
-| `heal.ts` | `npm run heal -- <spec-path>` | Re-resolves broken selectors in a spec against the live page and writes the fixes back in place. Flags: `--base-url <url>`, `--dry-run`. |
+| `heal.ts` | `npm run heal -- <spec-path>` | Thin wrapper around the published qa-core-heal npm package, which owns all healing logic. Parses argv, forwards to the package's `heal()` (deep import `qa-core-heal/dist/heal.js`; the package ships no `main`/`exports`), and prints the report. Also re-exports `heal` for the gateway and MCP server, so every heal path goes through the same package integration. Flags: `--base-url <url>`, `--dry-run`. |
 
 ---
 
@@ -108,13 +108,12 @@ These run with `npx tsx scripts/<name>.ts`. They are deterministic and fast. Eac
 
 ## `skills/` — OpenClaw skill definitions
 
-Three Markdown files that describe QA-Core's commands to the OpenClaw skill router. Each one is a small frontmatter + body describing what the skill does, what arguments it takes, and the local command to run.
+Markdown files that describe QA-Core's commands to the OpenClaw skill router. Each one is a small frontmatter + body describing what the skill does, what arguments it takes, and the local command to run.
 
 | File | Skill |
 |---|---|
 | `explore-url.md` | `/explore` — give it a URL, get a Playwright suite. |
 | `generate-tests.md` | `/generate` — give it a user story, get a spec. |
-| `heal-spec.md` | `/heal` — give it a failing spec, get a healed one. |
 
 ---
 
