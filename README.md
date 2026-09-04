@@ -225,6 +225,8 @@ test("[happy] logged in with valid credentials", async ({ page }) => {
 
 If you prefer a single-file output without the page object, pass `--no-pom`.
 
+Other useful flags: `--features login,cart` limits planning to those features, and `--srs requirements.md` feeds a requirements document into the run (see the SRS-first workflow below).
+
 ### Review mode (sign-off before automation)
 
 For team workflows where a lead needs to approve scenarios before the Explorer runs:
@@ -250,7 +252,40 @@ npm run generate -- "As a user I want to log in so I can access my dashboard"
 npm run generate -- "..." --lang js --base-url https://staging.example.com
 ```
 
-This one does not open a browser. It produces code from acceptance criteria. Run the spec to verify it works against your real app.
+This one does not open a browser. It produces code from acceptance criteria. Run the spec to verify it works against your real app. Pass `--srs requirements.md` to inject the documented rules as context, so the generated tests verify the stated constraints and not just the story text.
+
+### SRS-first workflow (test what the document says)
+
+Give the agent your requirements document and it understands the functionality before planning a single test:
+
+```bash
+npm run explore -- https://your-app.example.com --srs docs/requirements.md
+```
+
+1. The SRS is loaded (`.md`, `.txt`, `.pdf`, or `.docx`; capped at 60,000 characters) and one cheap Haiku call converts it into a requirements map: features, per-feature rules with stable ids (R1, R2, ...), and the roles the document names. Only what the SRS states is extracted; URLs and rules are never invented.
+2. The map is written to `requirements-map.json` in the run directory and injected into the Planner, which now plans rule-first: scenarios are derived from the stated rules, and each scenario cites the rule ids it verifies in a third bracket, like `[login][negative][R3,R7] rejected a 5-character password`. A scenario discovered from the page with no matching rule is tagged `[-]`. With a map present the Planner may plan up to 4 scenarios per feature.
+3. The run ends with a rule-coverage report: `rule-coverage.json` plus a console summary (`Rule coverage: X of Y rules covered`). Every uncovered rule is listed with why (`not-planned`, or `planned-but-dropped` when the citing scenario did not survive replay and stability). That list is the "considered, not automated" report.
+
+The map shape:
+
+```typescript
+{
+  features: Array<{
+    name: string;          // kebab-case slug, e.g. "login"
+    description: string;   // one sentence
+    urls?: string[];       // only when the SRS states them
+    rules: Array<{
+      id: string;          // R1, R2... unique across the map
+      text: string;        // the rule in plain words
+      type: 'validation' | 'behavior' | 'permission' | 'navigation';
+    }>;
+  }>;
+  roles: string[];         // roles the SRS names, empty if none
+  truncated: boolean;      // true when the document was cut at the cap
+}
+```
+
+`--features` still wins for feature selection when both flags are set; the SRS rules keep steering the Planner either way. Without `--srs`, nothing changes: the Planner's input and output are exactly as before.
 
 ### Heal a spec that broke
 

@@ -6,6 +6,8 @@ import { transcribe } from '../agent/transcriber.js';
 import { scaffold, frameworkDirName, normalizeAndValidateUrl } from '../agent/scaffold.js';
 import { zipFrameworkToFile } from '../agent/zip-framework.js';
 import { parseCommaSeparated } from '../agent/parse-features.js';
+import { buildRequirementsMap, countRules, loadSrsText, type RequirementsMap } from '../agent/requirements.js';
+import { renderRuleCoverage } from '../agent/rule-coverage.js';
 import { readCsv } from '../agent/csv.js';
 import { renderReconciliation } from '../agent/reconcile.js';
 import type { PlannedScenario } from '../agent/planner.js';
@@ -50,6 +52,12 @@ interface ParsedArgs {
    * is a separate piece of work (deferred).
    */
   features: string[];
+  /**
+   * Path to an SRS document (--srs). Loaded and converted to a requirements
+   * map before the browser launches; the map steers rule-first planning and
+   * produces the rule-coverage report.
+   */
+  srs?: string;
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -103,12 +111,20 @@ function parseArgs(argv: string[]): ParsedArgs {
       }
       parsed.features = parseCommaSeparated(v);
     }
+    else if (a === '--srs') {
+      const v = args[++i];
+      if (!v) {
+        console.error('✗ --srs expects a file path (.md, .txt, .pdf, or .docx)');
+        process.exit(1);
+      }
+      parsed.srs = v;
+    }
     else if (a && !parsed.url) parsed.url = a;
   }
   if (!parsed.url && !parsed.fromPlan) {
     console.error('Usage:');
     console.error('  npm run explore -- <url> [--lang ts|js] [--name foo] [--out dir] [--review]');
-    console.error('                          [--features login,cart] [--no-pom] [--no-replay]');
+    console.error('                          [--features login,cart] [--srs requirements.md] [--no-pom] [--no-replay]');
     console.error('                          [--no-stability] [--stability N] [--no-stabilize]');
     console.error('                          [--stabilize-attempts N]');
     console.error('  npm run explore -- --from-plan <plan.csv> [--lang ts|js] [--name foo] [--no-pom]');
@@ -228,6 +244,34 @@ async function main(): Promise<void> {
   console.log(`  output:   ${path.relative(process.cwd(), outDir)}`);
   console.log('');
 
+  // SRS ingestion — all of it happens BEFORE the browser launches, so a bad
+  // document or an empty map fails fast and free.
+  let requirements: RequirementsMap | undefined;
+  if (args.srs) {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) {
+      console.error('✗ --srs needs ANTHROPIC_API_KEY set (the requirements map is built with a Haiku call).');
+      process.exit(1);
+    }
+    const { text, truncated } = await loadSrsText(args.srs);
+    const built = await buildRequirementsMap({ srsText: text, truncated, apiKey });
+    requirements = built.map;
+    if (requirements.features.length === 0) {
+      console.error(`✗ The SRS at ${args.srs} yielded no features. Nothing to plan from — check the document.`);
+      process.exit(1);
+    }
+    fs.mkdirSync(outDir, { recursive: true });
+    fs.writeFileSync(path.join(outDir, 'requirements-map.json'), JSON.stringify(requirements, null, 2));
+    console.log(
+      `  SRS: ${requirements.features.length} feature(s), ${countRules(requirements)} rule(s) · $${built.costUsd.toFixed(4)}` +
+      `${requirements.truncated ? ' · truncated at cap' : ''}`,
+    );
+    if (args.features.length > 0) {
+      console.log('  (--features wins for feature selection; the SRS rules still steer the Planner)');
+    }
+    console.log('');
+  }
+
   const specName = args.name ?? slug(url);
   const lang = args.lang;
 
@@ -242,6 +286,7 @@ async function main(): Promise<void> {
     stabilize: args.stabilize,
     maxStabilizeAttempts: args.stabilizeAttempts,
     features: args.features,
+    requirements,
     onEvent: (e) => {
       switch (e.type) {
         case 'plan_started':
@@ -435,6 +480,10 @@ async function main(): Promise<void> {
     console.log('');
     for (const line of renderReconciliation(result.reconciliation)) console.log(line);
   }
+  if (result.ruleCoverage) {
+    console.log('');
+    for (const line of renderRuleCoverage(result.ruleCoverage)) console.log(line);
+  }
   // v3: the new framework workflow is "cd into it and use it as a project".
   // For backward compat with --no-pom, still show the single-file command.
   if (args.pom) {
@@ -457,20 +506,24 @@ function hostnameOf(url: string): string {
 
 /**
  * After the zip is written, replace the on-disk framework directory with a
- * stub that contains only `run-report.json`. The zip is the deliverable;
- * the dir stays as a tombstone so the dashboard's run-history scan still
- * recognises this run.
+ * stub that contains only the run reports: `run-report.json`, plus (on SRS
+ * runs) `requirements-map.json` and `rule-coverage.json`. The zip is the
+ * deliverable; the dir stays as a tombstone so the dashboard's run-history
+ * scan still recognises this run and the rule-coverage report stays
+ * inspectable without unzipping.
  */
 function slimFrameworkDir(dir: string): void {
-  const reportPath = path.join(dir, 'run-report.json');
-  let reportContent: string | null = null;
-  if (fs.existsSync(reportPath)) {
-    try { reportContent = fs.readFileSync(reportPath, 'utf8'); } catch { /* leave null */ }
+  const KEEP = ['run-report.json', 'requirements-map.json', 'rule-coverage.json'];
+  const kept: Array<{ name: string; content: string }> = [];
+  for (const name of KEEP) {
+    const p = path.join(dir, name);
+    if (!fs.existsSync(p)) continue;
+    try { kept.push({ name, content: fs.readFileSync(p, 'utf8') }); } catch { /* skip */ }
   }
   try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* ignore */ }
-  if (reportContent !== null) {
+  if (kept.length > 0) {
     fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(reportPath, reportContent);
+    for (const f of kept) fs.writeFileSync(path.join(dir, f.name), f.content);
   }
 }
 

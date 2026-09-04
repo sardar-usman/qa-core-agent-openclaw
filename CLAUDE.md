@@ -74,6 +74,8 @@ Output is then transcribed by `pom.ts` (default — full POM framework) or `tran
 
 25. **`/heal <spec-path>` repairs an existing spec through the published `qa-core-heal` npm package. There is no in-repo heal engine.** `npm run heal -- <spec-path> [--base-url <url>] [--dry-run]` runs `src/cli/heal.ts`, a thin wrapper that parses the arguments, forwards them to `heal()` from the package, and prints the report. The wrapper contains no selector logic. The import is the deep path `qa-core-heal/dist/heal.js` on purpose: qa-core-heal 0.3.4 publishes no `main`/`exports` entry, only a bin, so the bare specifier does not resolve. The gateway `/heal` and MCP `qa_heal` import `heal` from the wrapper module, so every heal path goes through the same package integration. The package is deterministic (no LLM, no spec run): it probes every locator on the live page, re-resolves broken ones by semantic intent, refuses ambiguous or wrong-element matches, writes confirmed heals back in place, and reports every unhealable selector. Package docs: [npmjs.com/package/qa-core-heal](https://www.npmjs.com/package/qa-core-heal)
 
+26. **SRS ingestion is additive: without `--srs`, the Planner's input and output format are byte-identical to before this phase.** With `--srs <file>` (`.md`/`.txt` direct, `.pdf` via pdf-parse, `.docx` via mammoth, 60,000-character cap), `src/agent/requirements.ts` builds a `RequirementsMap` in one Haiku call (features with per-feature rules `R1..Rn` typed validation/behavior/permission/navigation, plus roles; only what the SRS states, URLs and rules never invented; malformed JSON gets one "return only valid JSON" retry then a clear error, and `parseRequirementsResponse` is exported so the recovery path is testable offline). The map is written to `requirements-map.json`, and an SRS whose feature list comes back empty fails the run BEFORE the browser launches. In the Planner the map arrives as a second system block appended AFTER the cached base SYSTEM (cache prefix untouched): planning becomes rule-first (stated rules over DOM evidence), each rule-verifying scenario cites its rule ids in a THIRD bracket (`[login][negative][R3,R7] ...`, page-discovered scenarios use `[-]`), and the ceiling becomes up to 4 scenarios per map feature. `parsePlan` (now exported) reads the bracket into `PlannedScenario.ruleIds` and tolerates its absence: a two-bracket or legacy line parses exactly as before with NO `ruleIds` key. `--features` wins for feature selection when both are set; the map still steers rules. Rule ids carry through `Scenario.ruleIds` into the RunReport (attached by name-match in `runtime.ts`), and `src/agent/rule-coverage.ts` classifies every rule as covered / planned-but-dropped / not-planned, written to `rule-coverage.json` and printed as `Rule coverage: X of Y rules covered` with the uncovered list (the considered-not-automated report). `slimFrameworkDir` preserves `requirements-map.json` and `rule-coverage.json` alongside `run-report.json`. Locked by `smoke-srs-parse`, `smoke-plan-rule-tags` (the no-`--srs` byte-identical invariant), and `smoke-rule-coverage`.
+
 ---
 
 ## Standard verification (run before claiming "done")
@@ -96,7 +98,8 @@ for s in smoke-tools smoke-finish smoke-hascount smoke-planner-parse \
          smoke-unique-data smoke-closeout-grace smoke-step-budget \
          smoke-table-gate smoke-circular smoke-compare-poll smoke-iframe \
          smoke-planner-iframe smoke-frame-value smoke-fill-verify \
-         smoke-pom-ambiguous smoke-filter-disambiguation smoke-selector-recovery; do
+         smoke-pom-ambiguous smoke-filter-disambiguation smoke-selector-recovery \
+         smoke-srs-parse smoke-plan-rule-tags smoke-rule-coverage; do
   echo "=== $s ==="
   npx tsx scripts/$s.ts
 done

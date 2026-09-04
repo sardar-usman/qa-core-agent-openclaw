@@ -1,6 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import { chromium, type Frame, type Page } from 'playwright';
 import { installEvalShim } from './eval-shim.js';
+import { renderRequirementsBlock, type RequirementsMap } from './requirements.js';
 
 /**
  * Planner — Step 1 of the multi-agent pipeline.
@@ -24,6 +25,13 @@ export interface PlannedScenario {
    * infer one from the scenario. Drives per-feature grouping downstream.
    */
   feature?: string;
+  /**
+   * Requirement rule ids this scenario verifies (e.g. ['R3','R7']), parsed
+   * from the third bracket of the rule-driven plan format. An empty array
+   * means the scenario was planned with a map present but matches no stated
+   * rule ([-] in the plan). Absent entirely in the no-map format.
+   */
+  ruleIds?: string[];
 }
 
 export interface PlanResult {
@@ -104,6 +112,22 @@ Notice scenario 4: the page's whole point is that the id regenerates, so the tes
 The first bracket is the FEATURE tag — a short, lowercase, kebab-case noun (e.g. login, cart, search, checkout, registration, forgot-password). Use the feature names the caller asked for verbatim when steering. When inferring on your own, pick the most natural feature name for that page (e.g. "login" for an authentication form).
 
 The second bracket is the CATEGORY (happy, negative, edge, a11y) — same as before.`;
+
+/**
+ * Rule-driven planning instructions, appended as a second system block ONLY
+ * when a requirements map is present. Adjusts the base constraints: rules
+ * come first, scenarios cite rule ids in a third bracket, and the ceiling
+ * becomes per-feature. The falsifiability doctrine is unchanged.
+ */
+const RULE_PLANNING = `Rule-driven planning — these adjust the base constraints when REQUIREMENTS are present:
+- Derive scenarios from the STATED rules first, DOM evidence second. A stated rule you can verify from this page always beats a scenario invented from the page alone.
+- Every scenario that verifies one or more rules MUST cite the rule ids in a THIRD bracket after the category, comma-separated. Example:
+    1. [login][negative][R3,R7] rejected a 5-character password — fails if the length rule stops being enforced
+- A scenario discovered from the page that matches NO stated rule uses [-] as the third bracket:
+    2. [login][edge][-] password field masks input — fails if the field renders the password as plain text
+- Scenario ceiling with a map: up to 4 scenarios per feature listed in REQUIREMENTS (this replaces the 3-6 total constraint). Still at least one happy, one negative, and one edge scenario for every feature whose rules support them; do not force a category a feature's rules give no basis for.
+- Never invent rules, features, or URLs beyond the REQUIREMENTS block.
+- Falsifiability is unchanged: every scenario must still name the concrete regression it catches, and all the banned vacuous shapes remain banned.`;
 
 const PLANNER_PRICE = { in: 1.0, out: 5.0 }; // Haiku 4.5 default
 
@@ -454,6 +478,14 @@ export async function plan(opts: {
    * undefined → infer-from-homepage (legacy behaviour).
    */
   features?: string[];
+  /**
+   * Optional requirements map built from an SRS (--srs). When present, a
+   * REQUIREMENTS system block lists every stated rule, planning becomes
+   * rule-first (scenarios cite rule ids in a third bracket), and the scenario
+   * ceiling rises to up to 4 per map feature. When absent, the Planner's
+   * input and output format are byte-identical to the pre-SRS behaviour.
+   */
+  requirements?: RequirementsMap;
 }): Promise<PlanResult> {
   const apiKey = opts.apiKey ?? process.env.ANTHROPIC_API_KEY;
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY is not set.');
@@ -506,10 +538,22 @@ export async function plan(opts: {
         contentFrames.map((f, i) => `  frame ${i + 1} (${f.frameChain.join(' > ')}): ${describeFrame(f)}`).join('\n')
       : '';
 
+    // Rule-driven planning: when a requirements map is present, a second system
+    // block lists the stated rules and switches the constraints to rule-first.
+    // It is appended AFTER the cached base SYSTEM block so the cache prefix is
+    // untouched, and it is absent entirely without a map, so the no-SRS prompt
+    // stays byte-identical to the pre-SRS behaviour.
+    const systemBlocks: Anthropic.TextBlockParam[] = [
+      { type: 'text', text: SYSTEM, cache_control: { type: 'ephemeral' } } as Anthropic.TextBlockParam,
+    ];
+    if (opts.requirements) {
+      systemBlocks.push({ type: 'text', text: `${renderRequirementsBlock(opts.requirements)}\n\n${RULE_PLANNING}` } as Anthropic.TextBlockParam);
+    }
+
     const response = await client.messages.create({
       model,
       max_tokens: 2000,
-      system: [{ type: 'text', text: SYSTEM, cache_control: { type: 'ephemeral' } } as Anthropic.TextBlockParam],
+      system: systemBlocks,
       messages: [
         {
           role: 'user',
@@ -547,7 +591,13 @@ export async function plan(opts: {
   }
 }
 
-function parsePlan(text: string): PlannedScenario[] {
+/**
+ * Parse the Planner's response into scenarios. Accepts the rule-driven
+ * three-bracket format, the v3.1 two-bracket format, and all four legacy
+ * variants. Exported so smoke-plan-rule-tags locks the REAL parser (the older
+ * smoke-planner-parse predates the export and tests a mirror).
+ */
+export function parsePlan(text: string): PlannedScenario[] {
   const m = text.match(/<plan>([\s\S]*?)<\/plan>/i);
   const body = m && m[1] ? m[1] : text;
   const lines = body
@@ -556,17 +606,28 @@ function parsePlan(text: string): PlannedScenario[] {
     .filter((l) => /^\d+[.)]/.test(l));
   const out: PlannedScenario[] = [];
   for (const raw of lines) {
-    // First try the v3.1 format with explicit feature tag:
-    //   "1. [feature][category] name — rationale"
+    // First try the feature-tagged formats:
+    //   v4 (rule-driven): "1. [feature][category][R1,R3] name — rationale"
+    //                     "1. [feature][category][-] name — rationale"
+    //   v3.1:             "1. [feature][category] name — rationale"
+    // The third bracket is OPTIONAL: without a requirements map the model never
+    // emits it and this regex parses the v3.1 lines exactly as before.
     const withFeature = raw.match(
-      /^\d+[.)]\s*\[([a-z][a-z0-9-]*)\]\s*\[?(happy|negative|edge|a11y)\]?\s*[:\-—–]?\s*(.+?)\s*[—–]+\s*(.+)$/i,
+      /^\d+[.)]\s*\[([a-z][a-z0-9-]*)\]\s*\[?(happy|negative|edge|a11y)\]?\s*(?:\[\s*(-|[Rr]\d+(?:\s*,\s*[Rr]\d+)*)\s*\])?\s*[:\-—–]?\s*(.+?)\s*[—–]+\s*(.+)$/i,
     );
-    if (withFeature && withFeature[1] && withFeature[2] && withFeature[3] && withFeature[4]) {
+    if (withFeature && withFeature[1] && withFeature[2] && withFeature[4] && withFeature[5]) {
+      const ruleBracket = withFeature[3];
+      const ruleIds = ruleBracket === undefined
+        ? undefined
+        : ruleBracket.trim() === '-'
+          ? []
+          : ruleBracket.split(',').map((r) => r.trim().toUpperCase()).filter((r) => /^R\d+$/.test(r));
       out.push({
         feature: withFeature[1].toLowerCase(),
         category: withFeature[2].toLowerCase() as PlannedScenario['category'],
-        name: withFeature[3].trim(),
-        rationale: withFeature[4].trim(),
+        name: withFeature[4].trim(),
+        rationale: withFeature[5].trim(),
+        ...(ruleIds !== undefined ? { ruleIds } : {}),
       });
       continue;
     }

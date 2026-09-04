@@ -1,4 +1,5 @@
 import Anthropic from '@anthropic-ai/sdk';
+import { renderRequirementsBlock, type RequirementsMap } from './requirements.js';
 
 /**
  * /generate — user story → Playwright spec source.
@@ -14,6 +15,12 @@ export interface GenerateOptions {
   language: 'ts' | 'js';
   baseUrl?: string;
   model?: string;
+  /**
+   * Optional requirements map built from an SRS (--srs). When present, the
+   * stated rules are injected as context so the generated scenarios verify
+   * the documented constraints, not just the story text.
+   */
+  requirements?: RequirementsMap;
 }
 
 export interface GenerateResult {
@@ -51,6 +58,12 @@ export async function generateFromStory(opts: GenerateOptions): Promise<Generate
     ? `Emit JavaScript using CommonJS: const { test, expect } = require('@playwright/test'); const AxeBuilder = require('@axe-core/playwright').default;`
     : `Emit TypeScript: import { test, expect } from '@playwright/test'; import AxeBuilder from '@axe-core/playwright';`;
   const baseHint = opts.baseUrl ? `Base URL is ${opts.baseUrl}.` : 'No base URL given — write tests against a relative path.';
+  // Requirements context from --srs: the stated rules steer which scenarios
+  // get written (documented constraints first, the story's phrasing second).
+  const requirementsNote = opts.requirements
+    ? `\n\n${renderRequirementsBlock(opts.requirements)}\n` +
+      `Derive scenarios from these stated rules first. For each rule the story touches, write a test that would fail if that rule broke. Do not invent rules or URLs beyond the ones listed.`
+    : '';
 
   const response = await client.messages.create({
     model,
@@ -58,7 +71,7 @@ export async function generateFromStory(opts: GenerateOptions): Promise<Generate
     // SDK 0.32 typedefs predate cache_control on TextBlockParam; cast to bypass.
     system: [{ type: 'text', text: SYSTEM_PROMPT, cache_control: { type: 'ephemeral' } } as Anthropic.TextBlockParam],
     messages: [
-      { role: 'user', content: `${langNote}\n${baseHint}\n\nUser story:\n\n${opts.story}` },
+      { role: 'user', content: `${langNote}\n${baseHint}${requirementsNote}\n\nUser story:\n\n${opts.story}` },
     ],
   });
 

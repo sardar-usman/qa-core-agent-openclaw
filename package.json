@@ -43,6 +43,8 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@playwright/test": "^1.48.0",
     "dotenv": "^16.4.5",
+    "mammoth": "^1.12.2",
+    "pdf-parse": "^1.1.4",
     "playwright": "^1.48.0",
     "qa-core-heal": "^0.3.4",
     "ws": "^8.20.0",
@@ -50,6 +52,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/pdf-parse": "^1.1.5",
     "@types/ws": "^8.18.1",
     "tsx": "^4.19.0",
     "typescript": "^5.6.0"

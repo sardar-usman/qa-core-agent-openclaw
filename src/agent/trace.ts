@@ -249,6 +249,11 @@ export interface Scenario {
    * legacy URL-pathname grouping in that case.
    */
   feature?: string;
+  /**
+   * Requirement rule ids this scenario verifies, inherited from the planned
+   * scenario it fulfils (SRS runs only). Absent without a requirements map.
+   */
+  ruleIds?: string[];
   steps: TraceStep[];
   /** Console messages of level 'error' / 'warning' that fired during the scenario. */
   consoleErrors?: Array<{ kind: 'error' | 'warning'; text: string }>;
@@ -279,7 +284,7 @@ export interface RunReport {
   startedAt: string;
   finishedAt: string;
   /** Scenarios proposed by the Planner before the Explorer ran. */
-  plan?: Array<{ name: string; category: string; rationale: string }>;
+  plan?: Array<{ name: string; category: string; rationale: string; feature?: string; ruleIds?: string[] }>;
   /** Per-scenario verdicts from the Critic. */
   review?: {
     verdicts: Array<{
@@ -410,4 +415,9 @@ export interface RunReport {
    * reconcile.ts.
    */
   reconciliation?: import('./reconcile.js').Reconciliation;
+  /**
+   * Rule coverage against the requirements map (SRS runs only). Also written
+   * to rule-coverage.json in the run output directory. Absent without --srs.
+   */
+  ruleCoverage?: import('./rule-coverage.js').RuleCoverage;
 }
