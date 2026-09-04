@@ -42,6 +42,12 @@ export interface ResolvedLocator {
   /** True when the cascade had to take `.first()` of multiple matches. */
   ambiguous: boolean;
   /**
+   * Text hint that narrowed a multi-match down to exactly one element via
+   * .filter({ hasText }). Part of the locator's identity: replay and the
+   * emitted spec must apply the same filter, before any .first().
+   */
+  filterText?: string;
+  /**
    * Chain of iframe selectors (outer→inner) the element lives behind. Empty /
    * undefined means the element is in the top frame. When set, replay and the
    * emitted spec scope in with page.frameLocator(chain[0]).frameLocator(...)
@@ -260,10 +266,30 @@ async function resolveInScope(page: Scope, spec: ResolveSpec): Promise<ResolvedL
   const name = spec.label ?? spec.intent;
   const ambiguousCandidates: Candidate[] = [];
 
+  // Hints usable for filter-based disambiguation when a level multi-matches.
+  const filterHints: string[] = [];
+  for (const h of [spec.text, spec.label]) {
+    const t = h?.trim();
+    if (t && t.length >= 2 && !filterHints.includes(t)) filterHints.push(t);
+  }
+
   const tryCandidate = async (c: Candidate): Promise<ResolvedLocator | null> => {
     const n = await countOf(c.locator);
     if (n === 1) return { locator: c.locator, level: c.level, arg: c.arg, ambiguous: false };
-    if (n > 1) ambiguousCandidates.push(c);
+    if (n > 1) {
+      // Filter-based disambiguation: a text or label hint can single out one
+      // of several matches (e.g. several "Add to cart" buttons, one inside the
+      // card whose text names the product). A unique filtered match wins at
+      // this level; filterText is recorded so replay and the emitted spec
+      // rebuild the exact same filtered locator.
+      for (const hint of filterHints) {
+        const filtered = c.locator.filter({ hasText: hint });
+        if ((await countOf(filtered)) === 1) {
+          return { locator: filtered, level: c.level, arg: c.arg, ambiguous: false, filterText: hint };
+        }
+      }
+      ambiguousCandidates.push(c);
+    }
     return null;
   };
 
@@ -534,6 +560,8 @@ export function frameScopeExpr(frameChain?: string[]): string {
 
 /**
  * Emit a Playwright call expression for the resolved cascade level.
+ * When `filterText` is set, the emitter appends `.filter({ hasText: ... })`
+ * (the disambiguation applied at resolve time), before any `.first()`.
  * When `ambiguous`, the emitter appends `.first()` so the runtime spec
  * survives strict-mode. When `frameChain` is set, the call scopes into the
  * frame first via frameLocator so it works under real `playwright test`.
@@ -543,8 +571,10 @@ export function emitLocatorCall(
   arg: ResolvedLocator['arg'],
   ambiguous = false,
   frameChain?: string[],
+  filterText?: string,
 ): string {
-  const tail = ambiguous ? '.first()' : '';
+  const filterPart = filterText ? `.filter({ hasText: ${JSON.stringify(filterText)} })` : '';
+  const tail = `${filterPart}${ambiguous ? '.first()' : ''}`;
   const root = frameScopeExpr(frameChain);
   switch (level) {
     case 'role': {

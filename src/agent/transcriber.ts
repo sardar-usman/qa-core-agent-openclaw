@@ -207,16 +207,16 @@ function emitAssertion(a: Assertion): string[] {
 }
 
 function loc(record: SelectorRecord): string {
-  return emitLocatorCall(record.level, record.arg, record.ambiguous === true, record.frameChain);
+  return emitLocatorCall(record.level, record.arg, record.ambiguous === true, record.frameChain, record.filterText);
 }
 
 function locFirst(record: SelectorRecord): string {
-  return emitLocatorCall(record.level, record.arg, true, record.frameChain);
+  return emitLocatorCall(record.level, record.arg, true, record.frameChain, record.filterText);
 }
 
 /** Multi-match locator (never .first()) — for count reads. */
 function locCount(record: SelectorRecord): string {
-  return emitLocatorCall(record.level, record.arg, false, record.frameChain);
+  return emitLocatorCall(record.level, record.arg, false, record.frameChain, record.filterText);
 }
 
 /** RHS expression that reads a capture/compare value the way `source` says. */

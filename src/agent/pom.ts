@@ -19,7 +19,7 @@ const COMPARE_POLL_TIMEOUT_MS = 10_000;
  *
  *   output/<run-id>/
  *     pages/
- *       BasePage.ts                    base class with goto + waitReady helpers
+ *       BasePage.ts                    base class with goto + expectVisible helpers
  *       <FeaturePage>.ts               one per detected logical page
  *     tests/
  *       <feature>.spec.ts              spec using the page objects
@@ -149,6 +149,14 @@ interface SelectorUsage {
   arg: SelectorRecord['arg'];
   /** iframe-selector chain the element lives behind (outer→inner), if any. */
   frameChain?: string[];
+  /**
+   * True when ANY occurrence of this intent resolved ambiguously during
+   * exploration. The promoted class field must then emit .first(), or the
+   * emitted locator trips Playwright strict mode at runtime.
+   */
+  ambiguous: boolean;
+  /** Filter hint that made the locator unique at resolve time, if any. */
+  filterText?: string;
   /** Count across all scenarios on this page. */
   uses: number;
 }
@@ -299,8 +307,15 @@ function buildPageClass(group: PageGroup, _lang: 'ts' | 'js'): PageClassPlan {
       const cur = usage.get(key);
       if (cur) {
         cur.uses += 1;
+        // Ambiguity is sticky across occurrences: if the intent EVER resolved
+        // to several elements, the shared field needs .first().
+        cur.ambiguous = cur.ambiguous || target.ambiguous === true;
+        // Keep the first recorded filter hint (occurrences of one canonical
+        // intent resolve the same way, so a later differing hint is unexpected;
+        // first-wins keeps the field deterministic).
+        if (!cur.filterText && target.filterText) cur.filterText = target.filterText;
       } else {
-        usage.set(key, { intent: target.intent, level: target.level, arg: target.arg, frameChain: target.frameChain, uses: 1 });
+        usage.set(key, { intent: target.intent, level: target.level, arg: target.arg, frameChain: target.frameChain, ambiguous: target.ambiguous === true, filterText: target.filterText, uses: 1 });
       }
     }
   }
@@ -314,7 +329,7 @@ function buildPageClass(group: PageGroup, _lang: 'ts' | 'js'): PageClassPlan {
     const name = fieldName(u.intent, intentToField);
     fields.push({
       name,
-      record: { level: u.level, arg: u.arg, intent: u.intent, frameChain: u.frameChain },
+      record: { level: u.level, arg: u.arg, intent: u.intent, frameChain: u.frameChain, ambiguous: u.ambiguous || undefined, filterText: u.filterText },
     });
     intentToField.set(canonicalIntent(u.intent), name);
   }
@@ -356,9 +371,9 @@ export function canonicalIntent(intent: string): string {
 /** RHS expression for a capture/compare read, emitted inline. */
 function captureRhs(source: CaptureSource, target: SelectorRecord, attribute?: string): string {
   if (source === 'count') {
-    return `await ${emitLocatorCall(target.level, target.arg, false, target.frameChain)}.count()`;
+    return `await ${emitLocatorCall(target.level, target.arg, false, target.frameChain, target.filterText)}.count()`;
   }
-  const locFirst = emitLocatorCall(target.level, target.arg, true, target.frameChain);
+  const locFirst = emitLocatorCall(target.level, target.arg, true, target.frameChain, target.filterText);
   if (source === 'attribute') return `(await ${locFirst}.getAttribute(${q(attribute!)}))?.trim() ?? ''`;
   return `(await ${locFirst}.textContent())?.trim() ?? ''`;
 }
@@ -496,10 +511,6 @@ function renderBasePage(ext: 'ts' | 'js'): string {
       `    await this.page.goto(this.url, { waitUntil: 'domcontentloaded' });`,
       `  }`,
       ``,
-      `  async waitReady(): Promise<void> {`,
-      `    await this.page.waitForLoadState('networkidle').catch(() => undefined);`,
-      `  }`,
-      ``,
       `  async expectVisible(locator: import('@playwright/test').Locator): Promise<void> {`,
       `    await expect(locator).toBeVisible();`,
       `  }`,
@@ -516,9 +527,6 @@ function renderBasePage(ext: 'ts' | 'js'): string {
     `  }`,
     `  async goto() {`,
     `    await this.page.goto(this.url, { waitUntil: 'domcontentloaded' });`,
-    `  }`,
-    `  async waitReady() {`,
-    `    await this.page.waitForLoadState('networkidle').catch(() => undefined);`,
     `  }`,
     `  async expectVisible(locator) {`,
     `    await expect(locator).toBeVisible();`,
@@ -545,7 +553,7 @@ function renderPageClass(plan: PageClassPlan, ext: 'ts' | 'js'): string {
     out.push(`  constructor(page: Page) {`);
     out.push(`    super(page);`);
     for (const f of plan.fields) {
-      out.push(`    this.${f.name} = ${emitLocatorCall(f.record.level, f.record.arg, f.record.ambiguous === true, f.record.frameChain)};`);
+      out.push(`    this.${f.name} = ${emitLocatorCall(f.record.level, f.record.arg, f.record.ambiguous === true, f.record.frameChain, f.record.filterText)};`);
     }
     out.push(`  }`);
     for (const m of plan.methods) {
@@ -565,7 +573,7 @@ function renderPageClass(plan: PageClassPlan, ext: 'ts' | 'js'): string {
   out.push(`    super(page);`);
   out.push(`    this.url = ${q(plan.url)};`);
   for (const f of plan.fields) {
-    out.push(`    this.${f.name} = ${emitLocatorCall(f.record.level, f.record.arg, f.record.ambiguous === true, f.record.frameChain)};`);
+    out.push(`    this.${f.name} = ${emitLocatorCall(f.record.level, f.record.arg, f.record.ambiguous === true, f.record.frameChain, f.record.filterText)};`);
   }
   out.push(`  }`);
   for (const m of plan.methods) {
@@ -592,17 +600,17 @@ function emitMethod(method: ActionMethod, intentToField: Map<string, string>, ex
       paramIdx++;
       body.push(field
         ? `await this.${field}.fill(${valueArg});`
-        : `await ${emitLocatorCall(step.target.level, step.target.arg, step.target.ambiguous === true, step.target.frameChain)}.fill(${valueArg});`);
+        : `await ${emitLocatorCall(step.target.level, step.target.arg, step.target.ambiguous === true, step.target.frameChain, step.target.filterText)}.fill(${valueArg});`);
     } else if (step.kind === 'click') {
       const field = intentToField.get(canonicalIntent(step.target.intent));
       body.push(field
         ? `await this.${field}.click();`
-        : `await ${emitLocatorCall(step.target.level, step.target.arg, step.target.ambiguous === true, step.target.frameChain)}.click();`);
+        : `await ${emitLocatorCall(step.target.level, step.target.arg, step.target.ambiguous === true, step.target.frameChain, step.target.filterText)}.click();`);
     } else if (step.kind === 'press') {
       const field = intentToField.get(canonicalIntent(step.target.intent));
       body.push(field
         ? `await this.${field}.press(${q(step.key)});`
-        : `await ${emitLocatorCall(step.target.level, step.target.arg, step.target.ambiguous === true, step.target.frameChain)}.press(${q(step.key)});`);
+        : `await ${emitLocatorCall(step.target.level, step.target.arg, step.target.ambiguous === true, step.target.frameChain, step.target.filterText)}.press(${q(step.key)});`);
     }
   }
   return [sig, ...body.map((l) => '  ' + l), `}`];
@@ -729,34 +737,34 @@ function emitStepCall(step: TraceStep, pc: PageClassPlan, handle: string): strin
       const field = pc.intentToField.get(canonicalIntent(step.target.intent));
       return [field
         ? `await ${handle}.${field}.click();`
-        : `await ${emitLocatorCall(step.target.level, step.target.arg, step.target.ambiguous === true, step.target.frameChain)}.click();`];
+        : `await ${emitLocatorCall(step.target.level, step.target.arg, step.target.ambiguous === true, step.target.frameChain, step.target.filterText)}.click();`];
     }
     case 'fill': {
       const field = pc.intentToField.get(canonicalIntent(step.target.intent));
       const valueArg = step.generate ? uniqueCallExpr(step.generate) : q(step.value);
       return [field
         ? `await ${handle}.${field}.fill(${valueArg});`
-        : `await ${emitLocatorCall(step.target.level, step.target.arg, step.target.ambiguous === true, step.target.frameChain)}.fill(${valueArg});`];
+        : `await ${emitLocatorCall(step.target.level, step.target.arg, step.target.ambiguous === true, step.target.frameChain, step.target.filterText)}.fill(${valueArg});`];
     }
     case 'press': {
       const field = pc.intentToField.get(canonicalIntent(step.target.intent));
       return [field
         ? `await ${handle}.${field}.press(${q(step.key)});`
-        : `await ${emitLocatorCall(step.target.level, step.target.arg, step.target.ambiguous === true, step.target.frameChain)}.press(${q(step.key)});`];
+        : `await ${emitLocatorCall(step.target.level, step.target.arg, step.target.ambiguous === true, step.target.frameChain, step.target.filterText)}.press(${q(step.key)});`];
     }
     case 'select_option': {
       const field = pc.intentToField.get(canonicalIntent(step.target.intent));
-      const base = field ? `${handle}.${field}` : emitLocatorCall(step.target.level, step.target.arg, step.target.ambiguous === true, step.target.frameChain);
+      const base = field ? `${handle}.${field}` : emitLocatorCall(step.target.level, step.target.arg, step.target.ambiguous === true, step.target.frameChain, step.target.filterText);
       return [`await ${base}.${selectOptionExpr(step.by, step.option)};`];
     }
     case 'set_checked': {
       const field = pc.intentToField.get(canonicalIntent(step.target.intent));
-      const base = field ? `${handle}.${field}` : emitLocatorCall(step.target.level, step.target.arg, step.target.ambiguous === true, step.target.frameChain);
+      const base = field ? `${handle}.${field}` : emitLocatorCall(step.target.level, step.target.arg, step.target.ambiguous === true, step.target.frameChain, step.target.filterText);
       return [`await ${base}.${step.checked ? 'check' : 'uncheck'}();`];
     }
     case 'set_input_files': {
       const field = pc.intentToField.get(canonicalIntent(step.target.intent));
-      const base = field ? `${handle}.${field}` : emitLocatorCall(step.target.level, step.target.arg, step.target.ambiguous === true, step.target.frameChain);
+      const base = field ? `${handle}.${field}` : emitLocatorCall(step.target.level, step.target.arg, step.target.ambiguous === true, step.target.frameChain, step.target.filterText);
       return [`await ${base}.setInputFiles(${filesArg(step.files)});`];
     }
     case 'wait':
@@ -797,7 +805,7 @@ function emitStepCall(step: TraceStep, pc: PageClassPlan, handle: string): strin
         case 'equal':
           lines.push(`await expect.poll(async () => ${readRhs}, ${pollOpts}).toBe(${step.varName}); // value held`);
           if (step.bounds) {
-            const locFirst = emitLocatorCall(step.target.level, step.target.arg, true, step.target.frameChain);
+            const locFirst = emitLocatorCall(step.target.level, step.target.arg, true, step.target.frameChain, step.target.filterText);
             lines.push(
               `const ${step.readVar}Now = Number(${readRhs});`,
               `const ${step.readVar}Min = Number(await ${locFirst}.getAttribute(${q(step.bounds.min)}));`,
@@ -820,7 +828,7 @@ function emitStepCall(step: TraceStep, pc: PageClassPlan, handle: string): strin
       const field = pc.intentToField.get(canonicalIntent(step.target.intent));
       const locExpr = field
         ? `${handle}.${field}`
-        : emitLocatorCall(step.target.level, step.target.arg, step.target.ambiguous === true, step.target.frameChain);
+        : emitLocatorCall(step.target.level, step.target.arg, step.target.ambiguous === true, step.target.frameChain, step.target.filterText);
       return [`await ${locExpr}.waitFor({ state: '${step.state}' });`];
     }
   }
@@ -830,14 +838,14 @@ function emitAssertion(a: Assertion, pc: PageClassPlan, handle: string): string 
   switch (a.type) {
     case 'toBeVisible': {
       const field = pc.intentToField.get(canonicalIntent(a.target.intent));
-      const loc = field ? `${handle}.${field}` : emitLocatorCall(a.target.level, a.target.arg, a.target.ambiguous === true, a.target.frameChain);
+      const loc = field ? `${handle}.${field}` : emitLocatorCall(a.target.level, a.target.arg, a.target.ambiguous === true, a.target.frameChain, a.target.filterText);
       const opts = a.timeout ? `{ timeout: ${a.timeout} }` : '';
       return `await expect(${loc}).toBeVisible(${opts});`;
     }
     case 'toHaveText':
     case 'toContainText': {
       const field = pc.intentToField.get(canonicalIntent(a.target.intent));
-      const loc = field ? `${handle}.${field}` : emitLocatorCall(a.target.level, a.target.arg, a.target.ambiguous === true, a.target.frameChain);
+      const loc = field ? `${handle}.${field}` : emitLocatorCall(a.target.level, a.target.arg, a.target.ambiguous === true, a.target.frameChain, a.target.filterText);
       const fn = a.type === 'toHaveText' ? 'toHaveText' : 'toContainText';
       const opts = a.timeout ? `, { timeout: ${a.timeout} }` : '';
       return `await expect(${loc}).${fn}(${q(a.text)}${opts});`;
@@ -848,25 +856,31 @@ function emitAssertion(a: Assertion, pc: PageClassPlan, handle: string): string 
       // Absence assertion. Force .first() so a selector matching several hidden
       // nodes (or none) never trips strict mode. An absent element has no page
       // object field, so always emit the inline locator.
-      const loc = emitLocatorCall(a.target.level, a.target.arg, true, a.target.frameChain);
+      const loc = emitLocatorCall(a.target.level, a.target.arg, true, a.target.frameChain, a.target.filterText);
       const opts = a.timeout ? `{ timeout: ${a.timeout} }` : '';
       return `await expect(${loc}).toBeHidden(${opts});`;
     }
     case 'toHaveCount': {
+      // toHaveCount needs the multi-match locator (invariant: a count check is
+      // meaningless after .first()). A field whose intent was ever ambiguous
+      // now emits .first(), so bypass it and emit the bare locator inline.
       const field = pc.intentToField.get(canonicalIntent(a.target.intent));
-      const loc = field ? `${handle}.${field}` : emitLocatorCall(a.target.level, a.target.arg, a.target.ambiguous === true, a.target.frameChain);
+      const fieldRec = field ? pc.fields.find((f) => f.name === field)?.record : undefined;
+      const loc = field && fieldRec && fieldRec.ambiguous !== true
+        ? `${handle}.${field}`
+        : emitLocatorCall(a.target.level, a.target.arg, false, a.target.frameChain, a.target.filterText);
       const opts = a.timeout ? `, { timeout: ${a.timeout} }` : '';
       return `await expect(${loc}).toHaveCount(${a.count}${opts});`;
     }
     case 'toHaveAttribute': {
       const field = pc.intentToField.get(canonicalIntent(a.target.intent));
-      const loc = field ? `${handle}.${field}` : emitLocatorCall(a.target.level, a.target.arg, a.target.ambiguous === true, a.target.frameChain);
+      const loc = field ? `${handle}.${field}` : emitLocatorCall(a.target.level, a.target.arg, a.target.ambiguous === true, a.target.frameChain, a.target.filterText);
       const opts = a.timeout ? `, { timeout: ${a.timeout} }` : '';
       return `await expect(${loc}).toHaveAttribute(${q(a.attribute)}, ${q(a.value)}${opts});`;
     }
     case 'toHaveValue': {
       const field = pc.intentToField.get(canonicalIntent(a.target.intent));
-      const loc = field ? `${handle}.${field}` : emitLocatorCall(a.target.level, a.target.arg, a.target.ambiguous === true, a.target.frameChain);
+      const loc = field ? `${handle}.${field}` : emitLocatorCall(a.target.level, a.target.arg, a.target.ambiguous === true, a.target.frameChain, a.target.filterText);
       const opts = a.timeout ? `, { timeout: ${a.timeout} }` : '';
       return `await expect(${loc}).toHaveValue(${q(a.value)}${opts});`;
     }

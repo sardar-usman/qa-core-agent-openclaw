@@ -207,6 +207,9 @@ export type AgentEvent =
   | { type: 'stability_done'; stable: number; flaked: number; recovered?: number; iterations: number; flakeRate: number; durationMs: number; stabilizerCostUsd?: number }
   | { type: 'gate_injection'; scenario: string; step: number; assertionType: string; detail: string }
   | { type: 'gate_broken'; scenario: string; reason: string; attempts: number }
+  // Reports an IN-RUN SELECTOR RECOVERY (a locator that failed to resolve was
+  // re-resolved a different stable way during exploration). The type stays
+  // 'heal' and the payload shape stays fixed because the dashboard consumes it.
   | { type: 'heal'; from: string; to: string; intent: string; scenario?: string }
   | { type: 'done'; scenarios: number };
 
@@ -365,8 +368,9 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
   // Scenarios where the expected outcome never occurred (retry cap tripped).
   // Real findings, not budget casualties. Surfaced loudly below.
   let findings: Array<{ scenario: string; category?: string; expected: string; url: string; messages: string[] }> = [];
-  // Selector heals applied during exploration (a failed locator re-resolved a
-  // different, stable way). Carried into the report for human visibility.
+  // In-run selector recoveries applied during exploration (a failed locator
+  // re-resolved a different, stable way). Carried into the report for human
+  // visibility. The field keeps its `heals` name for the dashboard.
   let heals: Array<{ scenario?: string; intent: string; from: string; to: string }> = [];
 
   try {
@@ -835,9 +839,10 @@ async function runAgentLoop(args: {
   // margin covers the final finish() turn plus any thinking-only turns.
   const maxTurns = maxSteps + 8;
   let endedReason: 'finished' | 'model_stop' | 'budget' = 'budget';
-  // How many heal events have already been surfaced. Selector heals are recorded
-  // on ctx by resolveAndRecord (deep inside a tool call); we drain new ones after
-  // each tool runs so each shows up as its own visible event in the run output.
+  // How many 'heal' events have already been surfaced. In-run selector
+  // recoveries are recorded on ctx by resolveAndRecord (deep inside a tool
+  // call); we drain new ones after each tool runs so each shows up as its own
+  // visible event in the run output.
   let emittedHeals = 0;
 
   for (let turn = 0; turn < maxTurns; turn++) {
@@ -897,7 +902,7 @@ async function runAgentLoop(args: {
         input: (block.input ?? {}) as Record<string, unknown>,
       });
       onEvent?.({ type: 'tool_result', name: block.name, ok: result.ok, data: result.data, error: result.error });
-      // Surface any heals that just happened, one distinct event each.
+      // Surface any selector recoveries that just happened, one distinct event each.
       while (emittedHeals < ctx.heals.length) {
         const h = ctx.heals[emittedHeals++]!;
         onEvent?.({ type: 'heal', from: h.from, to: h.to, intent: h.intent, scenario: h.scenario });

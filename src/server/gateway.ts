@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { explore } from '../agent/runtime.js';
 import { generateFromStory } from '../agent/generate.js';
-import { heal } from '../agent/heal.js';
+import { heal } from '../cli/heal.js';
 import { transcribe } from '../agent/transcriber.js';
 import { transcribePOM } from '../agent/pom.js';
 import { scaffold, frameworkDirName, normalizeAndValidateUrl } from '../agent/scaffold.js';
