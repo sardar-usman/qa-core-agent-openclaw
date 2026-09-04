@@ -175,6 +175,13 @@ export interface SelectorRecord {
    */
   ambiguous?: boolean;
   /**
+   * Text hint that narrowed a multi-match to exactly one element via
+   * .filter({ hasText }) at resolve time. Part of the locator's identity:
+   * replay rebuilds the same filtered locator and the emitters append
+   * .filter({ hasText: ... }) before any .first().
+   */
+  filterText?: string;
+  /**
    * Chain of iframe selectors (outer→inner) the element lives behind. Absent
    * means the top frame. Replay scopes in with frameLocator before applying the
    * level; the emitted spec does the same, so reads/types/asserts all target
@@ -384,14 +391,16 @@ export interface RunReport {
    */
   findings?: Array<{ scenario: string; category?: string; expected: string; url: string; messages: string[] }>;
   /**
-   * Selector heals applied during exploration: a locator that failed to resolve
-   * was automatically re-resolved against the live page by the locator ladder and
-   * found by a different stable locator, so the run continued instead of failing.
-   * Each entry names the scenario, what the model asked for (`from`), what it
-   * re-resolved to (`to`), and the intent, so a human can see exactly what was
-   * healed and why. Healing is scoped to locators only, never to assertions (an
-   * assertion that fails is a possible real regression and is recorded as a
-   * finding, never healed). Absent when nothing was healed.
+   * In-run selector recoveries applied during exploration: a locator that
+   * failed to resolve was automatically re-resolved against the live page by
+   * the locator ladder and found by a different stable locator, so the run
+   * continued instead of failing. Each entry names the scenario, what the model
+   * asked for (`from`), what it re-resolved to (`to`), and the intent, so a
+   * human can see exactly what was recovered. Recovery is scoped to locators
+   * only, never to assertions (an assertion that fails is a possible real
+   * regression and is recorded as a finding, never recovered). Absent when
+   * nothing was recovered. The field keeps its `heals` name because the
+   * dashboard and run-report consumers read it.
    */
   heals?: Array<{ scenario?: string; intent: string; from: string; to: string }>;
   /**

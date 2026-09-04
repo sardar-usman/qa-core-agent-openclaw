@@ -44,6 +44,7 @@
     "@playwright/test": "^1.48.0",
     "dotenv": "^16.4.5",
     "playwright": "^1.48.0",
+    "qa-core-heal": "^0.3.4",
     "ws": "^8.20.0",
     "zod": "^3.23.8"
   },

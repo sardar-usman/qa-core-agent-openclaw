@@ -1,14 +1,25 @@
 import 'dotenv/config';
 import path from 'node:path';
-import { heal } from '../agent/heal.js';
+import { pathToFileURL } from 'node:url';
+import { heal } from 'qa-core-heal/dist/heal.js';
 
 /**
  * CLI:  npm run heal -- <spec-path> [--base-url <url>] [--dry-run]
  *
- * Opens the live page the spec targets, probes every locator, and re-resolves
- * the broken ones against the page with the same locator ladder the Explorer
- * uses. Repaired files are written back in place (use --dry-run to preview).
+ * Thin wrapper around the published qa-core-heal package, which owns all
+ * selector-healing logic (probing, the locator ladder, same-element
+ * confirmation, write-back). This file only parses arguments, forwards them
+ * to the package, and prints the report.
+ *
+ * The package import path is deliberately deep (qa-core-heal/dist/heal.js):
+ * qa-core-heal 0.3.4 ships no "main"/"exports" entry, only a bin.
+ *
+ * The gateway /heal and the MCP qa_heal tool import { heal } from this module
+ * so every heal path goes through the same package integration.
  */
+
+export { heal };
+export type { HealOptions, HealResult, HealEvent } from 'qa-core-heal/dist/heal.js';
 
 function parseArgs(argv: string[]): { specPath: string; baseUrl?: string; write: boolean } {
   const args = argv.slice(2);
@@ -31,7 +42,7 @@ function parseArgs(argv: string[]): { specPath: string; baseUrl?: string; write:
 async function main(): Promise<void> {
   const { specPath, baseUrl, write } = parseArgs(process.argv);
 
-  console.log(`▸ Healing ${specPath}${write ? '' : '  (dry run — no files written)'}`);
+  console.log(`▸ Healing ${specPath}${write ? '' : '  (dry run, no files written)'}`);
   console.log('');
 
   const result = await heal({
@@ -43,7 +54,7 @@ async function main(): Promise<void> {
         case 'healing':      console.log(`  → broken: ${e.selector}`); break;
         case 'healed':       console.log(`    ✓ healed → ${e.new}  (level=${e.level}, ${e.file})`); break;
         case 'unhealed':     console.log(`    ✗ unhealable: ${e.selector}\n        ${e.reason} (${e.file})`); break;
-        case 'done':         break;
+        default:             break;
       }
     },
   });
@@ -62,13 +73,16 @@ async function main(): Promise<void> {
     console.log('\nWrote:');
     for (const f of result.filesWritten) console.log(`  ${path.relative(process.cwd(), f)}`);
   } else if (result.healed.length) {
-    console.log('\n(dry run — nothing written)');
+    console.log('\n(dry run, nothing written)');
   } else {
     console.log('\nNothing to heal.');
   }
 }
 
-main().catch((err) => {
-  console.error('\n✗ Healing failed:', err.message);
-  process.exit(1);
-});
+const invokedDirectly = process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
+if (invokedDirectly) {
+  main().catch((err) => {
+    console.error('\n✗ Healing failed:', err.message);
+    process.exit(1);
+  });
+}

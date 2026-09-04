@@ -47,7 +47,7 @@ It runs a real five-stage agent pipeline. Three stages use the LLM. Two don't.
 * The **Reality-Check Replay** re-executes every recorded scenario in a fresh browser context. Scenarios that fail the second independent run are dropped before any spec is written. Zero LLM cost.
 * The **Stability Iteration** runs each replay-survivor three more times. Scenarios that pass-then-fail are dropped as flaky. Produces a `flake_rate` metric per run. Zero LLM cost.
 * The **Transcriber** is deterministic. It turns the verified trace into Playwright code with a matching `beforeEach` so the emitted spec runs under the same isolation policy.
-* The **Healer** is on-demand. When a real Playwright run fails because the page changed, it re-resolves the broken selectors live.
+* The **Healer** is on-demand and lives in the published [qa-core-heal](https://www.npmjs.com/package/qa-core-heal) package. When a real Playwright run fails because the page changed, it re-resolves the broken selectors live.
 
 This means every line in the final spec corresponds to an action that already passed five independent executions in fresh browser contexts before the file is written: one exploration, one replay, three stability re-runs.
 
@@ -136,13 +136,13 @@ Every generated spec ships with an `@axe-core/playwright` accessibility check ag
 
 After each run, the agent saves what it learned about that site to `.qa-core/sites/<host>.json`. This includes the intents it observed and the selector cascade level that worked. The next run against the same host loads this memory into the system prompt as a cached block. Repeat runs are typically 90 percent cheaper than the cold path.
 
-### Self-healing
+### Selector recovery and healing
 
-Healing happens in two places, both deterministic and both reusing the same selector ladder.
+Selector repair happens in two places, both deterministic.
 
-During exploration, a selector that fails to resolve is re-resolved automatically. The agent drops the specific hint that failed and re-finds the element by its semantic intent, then continues. Each heal is logged (`healed: <old> re-resolved to <new>`) and recorded in the run report. This is scoped to locators only. An assertion that fails is never healed, because that may be a real bug. After two failed heals on the same selector it is recorded as a finding, not a silent pass.
+During exploration, a selector that fails to resolve is recovered in-run (selector recovery). The agent drops the specific hint that failed and re-finds the element by its semantic intent, then continues. Each recovery is logged (`healed: <old> re-resolved to <new>`) and recorded in the run report. This is scoped to locators only. An assertion that fails is never recovered, because that may be a real bug. After two failed recoveries on the same selector it is recorded as a finding, not a silent pass.
 
-For an existing spec, `npm run heal -- <spec-path>` opens the live page the spec targets, probes every locator, and re-resolves only the broken ones with that same ladder. It reads the page object too when the spec uses POM. Each re-resolved locator is confirmed to point at the same intended element (its accessible name / text still matches) before it is accepted, so a heal to the wrong element is refused. The repaired files are written back in place and every selector it could not heal is reported. No model call, no spec run.
+Healing an existing spec is handled by the published [qa-core-heal](https://www.npmjs.com/package/qa-core-heal) package. `npm run heal -- <spec-path>` is a thin wrapper that forwards to it: the package opens the live page the spec targets, probes every locator, re-resolves only the broken ones, confirms each re-resolved locator still points at the same intended element (a heal to the wrong element is refused), and writes the repaired files back in place. It reads the page object too when the spec uses POM. Every selector it could not heal is reported. No model call, no spec run.
 
 ### More reference material
 
@@ -179,7 +179,7 @@ By default `/explore` emits a full Page Object Model framework. Output lands und
 ```text
 output/20260514-160000-saucedemo-com/
   pages/
-    BasePage.ts                    # base class with goto + waitReady helpers
+    BasePage.ts                    # base class with goto + expectVisible helpers
     SaucedemoPage.ts               # typed Locator fields + loginAs(user, pass)
   tests/
     saucedemo.spec.ts              # spec that uses the page object
@@ -258,7 +258,7 @@ This one does not open a browser. It produces code from acceptance criteria. Run
 npm run heal -- output/<run-id>/<name>.spec.ts [--base-url https://...] [--dry-run]
 ```
 
-QA-Core opens the live page the spec targets (from a `page.goto`, a page object's `url`, or `--base-url`) and probes every locator. A locator that still resolves is left untouched. A broken one is re-resolved on the live page with the same locator ladder the Explorer uses, then confirmed to point at the same intended element before it is accepted. When the spec uses POM, the locators inside the imported page object are healed too. The repaired files are written back in place, `--dry-run` previews without writing, and the report names every heal and every selector it could not heal. This is deterministic: no model call and no spec run.
+The command is a thin wrapper around the published [qa-core-heal](https://www.npmjs.com/package/qa-core-heal) package. It opens the live page the spec targets (from a `page.goto`, a page object's `url`, or `--base-url`) and probes every locator. A locator that still resolves is left untouched. A broken one is re-resolved on the live page, then confirmed to point at the same intended element before it is accepted. When the spec uses POM, the locators inside the imported page object are healed too. The repaired files are written back in place, `--dry-run` previews without writing, and the report names every heal and every selector it could not heal. This is deterministic: no model call and no spec run.
 
 ### Run the suite
 
@@ -370,14 +370,13 @@ src/
     pom.ts            # Page Object Model emitter (default): BasePage + per-page classes
     trace.ts          # types: Scenario, TraceStep, Assertion, RunReport
     generate.ts       # /generate: story to spec, no browser
-    heal.ts           # selector self-healing, re-resolves broken calls live
     memory.ts         # per-host fingerprints + project memory, cached into prompt
     eval-shim.ts      # __name no-op shim installed into every browser context
     csv.ts            # CSV utilities for the --review plan-approval flow
   cli/
     explore.ts        # npm run explore
     generate.ts       # npm run generate
-    heal.ts           # npm run heal
+    heal.ts           # npm run heal (thin wrapper around the qa-core-heal package)
   server/
     gateway.ts        # WebSocket bridge between qa-core-ui.html and the runtime
   mcp/

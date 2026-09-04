@@ -407,6 +407,13 @@ function locatorFromRecord(page: Page, record: SelectorRecord): Locator {
  * Export so tools.ts can reach this path for toHaveCount.
  */
 export function baseLocator(page: Page, record: SelectorRecord): Locator {
+  const raw = rawLocator(page, record);
+  // A filterText recorded at resolve time is part of the locator's identity
+  // (it is what made the match unique), so replay applies the same filter.
+  return record.filterText ? raw.filter({ hasText: record.filterText }) : raw;
+}
+
+function rawLocator(page: Page, record: SelectorRecord): Locator {
   // Scope into the iframe chain first, if any, so the locator reads/types/
   // asserts inside the frame and not against the top document.
   const scope: Page | FrameLocator =

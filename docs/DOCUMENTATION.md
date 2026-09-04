@@ -46,7 +46,7 @@ QA-Core is an autonomous QA agent that turns three kinds of input into runnable 
 
 It is built on:
 
-- **Claude** (via the Anthropic SDK) — Opus 4.7 for exploration, Sonnet 4.6 for review, Haiku 4.5 for cheap pre-passes (selector healing is deterministic, no model)
+- **Claude** (via the Anthropic SDK) — Opus 4.7 for exploration, Sonnet 4.6 for review, Haiku 4.5 for cheap pre-passes (in-run selector recovery is deterministic, no model; spec healing is the qa-core-heal package)
 - **Playwright** + TypeScript — the test framework + the live browser the agent drives
 - **OpenClaw** — the persona, channel routing, and slash-command layer
 - **MCP** (Model Context Protocol) — for native integration in Claude Desktop, Cursor, Cline, etc.
@@ -64,7 +64,7 @@ The other differentiators:
 - **Per-scenario state isolation** — cookies, localStorage, and sessionStorage are cleared at the start of every scenario. The transcribed spec emits a matching `beforeEach` so tests pass in isolation, not just in the order they were recorded.
 - **Console + network error capture** — every `console.error`, `pageerror`, and 4xx/5xx response during a scenario is attached to the scenario record.
 - **Per-codebase memory** — site fingerprints cached across runs, so repeat runs against the same host are faster, cheaper, and more consistent
-- **Self-healing selectors** — deterministic, no model. A broken selector is re-resolved on the live page with the same locator ladder, both automatically during exploration and on demand via `npm run heal`
+- **Selector recovery + healing** — deterministic, no model. During exploration, a selector that fails to resolve is recovered in-run by its semantic intent. For an existing spec, `npm run heal` forwards to the published [qa-core-heal](https://www.npmjs.com/package/qa-core-heal) package, which re-resolves broken selectors on the live page
 - **Partitioned accessibility check** — every generated spec ships with an `@axe-core/playwright` check that fails only on `critical` / `serious` WCAG 2 AA violations and logs the rest. (v1's zero-tolerance gate was unshippable in practice.)
 - **Cost budgets** — hard USD ceiling per run, per-stage cost reporting, prompt caching on three blocks
 - **Optional human checkpoint** — `--review` mode exports the Planner's scenario list to a CSV for stakeholder approval before the Explorer runs
@@ -367,20 +367,22 @@ interface ScenarioVerdict {
 
 ### Selector healing (deterministic, on-demand)
 
-**File:** [`src/agent/heal.ts`](../src/agent/heal.ts) · CLI: [`src/cli/heal.ts`](../src/cli/heal.ts)
+**Package:** [qa-core-heal](https://www.npmjs.com/package/qa-core-heal) · Wrapper: [`src/cli/heal.ts`](../src/cli/heal.ts)
 
 **Job:** When a generated spec stops working because the page changed, re-resolve the broken selectors against the live page and write the fixes back. No model call, no spec run.
 
-**Flow:**
+Healing is provided by the published qa-core-heal npm package. The agent no longer ships its own heal engine: `src/cli/heal.ts` is a thin wrapper that parses the CLI arguments, forwards them to the package's `heal()` API, and prints the report. The gateway `/heal` and the MCP `qa_heal` tool import `heal` from the same wrapper, so every heal path goes through the package.
+
+**Flow (inside the package):**
 1. Load the spec and, when it uses POM, the page-object files it imports (the locators live there, not in the spec)
 2. Find the target URL from `--base-url`, a `page.goto("http…")`, or a page object's `url`, and open it once in a fresh browser context
 3. For each locator in the source:
    - Rebuild the real Playwright locator and ask the live page `.count()`. A locator that still resolves is left untouched.
-   - A broken one is re-resolved by `healResolve` (the SAME locator ladder the Explorer uses) by the semantic intent the original locator carried
+   - A broken one is re-resolved by the package's locator ladder from the semantic intent the original locator carried
    - **Refuse** an ambiguous match, and **confirm** the re-resolved element still carries the original identity (accessible name / text / value), so a heal to the wrong element cannot ship
-4. Write the confirmed heals back in place with the shared `emitLocatorCall` emitter (or preview with `--dry-run`), and report every selector it could not heal
+4. Write the confirmed heals back in place (or preview with `--dry-run`), and report every selector it could not heal
 
-**Why this matters:** Without self-healing, every UI change in production means re-running the whole `/explore` pipeline. With it, the suite repairs itself between deploys. Because it reuses the exploration ladder, there is one selector engine in the codebase, not two.
+**Why this matters:** Without healing, every UI change in production means re-running the whole `/explore` pipeline. With it, the suite repairs itself between deploys.
 
 **Same-element guard:** an unhealable selector (missing element, ambiguous match, or a loose match to a different element) is reported and left unchanged, never silently dropped or wrongly rewritten.
 
@@ -555,7 +557,7 @@ The output spec carries an UNVERIFIED header until you run it.
 
 ### 6.3 `npm run heal`
 
-Re-resolve selectors that stopped working, against the live page. Deterministic: no model call, no spec run.
+Re-resolve selectors that stopped working, against the live page. Deterministic: no model call, no spec run. The command is a thin wrapper that forwards to the published [qa-core-heal](https://www.npmjs.com/package/qa-core-heal) package.
 
 ```text
 npm run heal -- <spec-path>
@@ -706,7 +708,7 @@ There's also a `workflow_dispatch` trigger with an optional `run_eval` input tha
 [`.openclaw/config.json`](../.openclaw/config.json) registers QA-Core as an OpenClaw agent with:
 
 - Persona files (SOUL, IDENTITY, TOOLS, MEMORY)
-- Skill markdown files (explore-url, generate-tests, heal-spec)
+- Skill markdown files (explore-url, generate-tests)
 - A `runner` block pointing OpenClaw at `ws://127.0.0.1:18789` (the gateway) as the WebSocket bridge
 
 When OpenClaw is installed, it picks up the agent definition, routes incoming slash commands through the gateway, and applies the persona for any human-readable response. The gateway is what makes this loop real — without it, OpenClaw has the persona docs but no runtime to invoke.
@@ -947,7 +949,7 @@ The runtime reads the CSV, filters to rows with `Approve` matching `/^(y|yes|tru
 
 ## 12. Self-healing workflow
 
-When a spec generated last week fails today because the UI changed, `npm run heal` repairs it. It never runs the spec and never calls a model: it opens the live page, probes each locator, and re-resolves only the broken ones with the same locator ladder the Explorer uses.
+When a spec generated last week fails today because the UI changed, `npm run heal` repairs it. The command forwards to the published [qa-core-heal](https://www.npmjs.com/package/qa-core-heal) package. It never runs the spec and never calls a model: it opens the live page, probes each locator, and re-resolves only the broken ones.
 
 ### Full sequence
 
@@ -974,9 +976,9 @@ npx playwright test output/20260513-104500-saucedemo/saucedemo.spec.ts
 For each locator, the healer:
 
 1. Rebuilds the real Playwright locator and asks the live page `.count()`. If it still resolves, it is left untouched.
-2. If it resolves to nothing, it re-resolves the element by the semantic intent the original locator carried (role name, label, placeholder, text, alt, title, testid, or a token from a CSS id/class) through the same ladder the Explorer uses.
+2. If it resolves to nothing, it re-resolves the element by the semantic intent the original locator carried (role name, label, placeholder, text, alt, title, testid, or a token from a CSS id/class) through the package's locator ladder.
 3. Confirms the re-resolved element is the SAME intended element: its accessible name / text / value must still carry the original identity. An ambiguous match, or a loose match to a different element, is refused.
-4. Writes the confirmed heal back in place with the shared emitter. When the spec uses POM, the fix lands in the imported page-object file, not the spec.
+4. Writes the confirmed heal back in place. When the spec uses POM, the fix lands in the imported page-object file, not the spec.
 
 ### What gets reported as unhealable
 
@@ -1272,23 +1274,29 @@ interface GenerateResult {
 
 ### `heal(opts)`
 
-**File:** [`src/agent/heal.ts`](../src/agent/heal.ts)
+**Package:** [qa-core-heal](https://www.npmjs.com/package/qa-core-heal), re-exported by the wrapper [`src/cli/heal.ts`](../src/cli/heal.ts)
 
 ```typescript
+import { heal } from 'qa-core-heal/dist/heal.js';
+
 async function heal(opts: HealOptions): Promise<HealResult>
 
+// The fields the agent uses. The package accepts and returns more;
+// see its own documentation for the full HealOptions / HealResult.
 interface HealOptions {
-  specPath: string;
-  model?: string;
+  specPath?: string;
   baseUrl?: string;
-  reportPath?: string;   // skip the test run, use this JSON report
+  write?: boolean;       // false previews without writing (--dry-run)
   onEvent?: (event: HealEvent) => void;
 }
 
 interface HealResult {
   healedPath: string | null;
-  healed: number;
-  total: number;
+  filesWritten: string[];
+  scanned: number;
+  intact: number;
+  healed: HealDetail[];
+  unhealable: UnhealDetail[];
 }
 ```
 
@@ -1396,7 +1404,6 @@ qa-core-agent/
 │   │   ├── transcriber.ts                # inline spec emission (deterministic)
 │   │   ├── pom.ts                        # POM framework emission (default, deterministic)
 │   │   ├── trace.ts                      # type definitions
-│   │   ├── heal.ts                       # /heal — selector self-healing (deterministic)
 │   │   ├── generate.ts                   # /generate — single-shot story → spec
 │   │   ├── memory.ts                     # per-host fingerprints + project aggregate
 │   │   ├── eval-shim.ts                  # __name no-op shim for every browser context
@@ -1405,7 +1412,7 @@ qa-core-agent/
 │   ├── cli/                              # CLI entry points
 │   │   ├── explore.ts
 │   │   ├── generate.ts
-│   │   └── heal.ts
+│   │   └── heal.ts                       # thin wrapper around the qa-core-heal package
 │   │
 │   ├── server/
 │   │   └── gateway.ts                    # WebSocket bridge between UI and runtime
@@ -1443,8 +1450,7 @@ qa-core-agent/
 │
 ├── skills/                               # OpenClaw skills
 │   ├── explore-url.md
-│   ├── generate-tests.md
-│   └── heal-spec.md
+│   └── generate-tests.md
 │
 ├── .openclaw/
 │   └── config.json                       # OpenClaw agent registration
@@ -1476,7 +1482,7 @@ qa-core-agent/
 - ✓ **Robust `page.evaluate`** — `__name` shim installed in every browser context (fixes tsx keepNames bug)
 - ✓ **Seven regression-protection smoke tests** — every v2 fix is locked in by a test
 - ✓ Per-host memory with intent reuse
-- ✓ Deterministic self-healing selectors — re-resolved live with the exploration ladder, automatically during a run and on demand via `npm run heal`
+- ✓ Deterministic selector repair — in-run selector recovery during exploration, and on-demand healing via `npm run heal` (the qa-core-heal package)
 - ✓ Cost budgets + prompt caching (3 cached blocks)
 - ✓ Review-mode CSV checkpoint (`--review` / `--from-plan`)
 - ✓ CLI + Web UI + WebSocket gateway + MCP server + GitHub Actions

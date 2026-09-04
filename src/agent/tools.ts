@@ -1,10 +1,10 @@
 import type { Page } from '@playwright/test';
 import { expect } from '@playwright/test';
 import { resolve, parsePiercingSelector, type CascadeLevel, escapeRegex } from './selectors.js';
-import { healResolve, type ResolveInput } from './heal-resolve.js';
-// Re-exported for back-compat: the MCP and gateway wrappers import these from
-// tools.ts. New code should import from heal-resolve.ts directly.
-export { healResolve, type ResolveInput };
+import { recoverResolve, type ResolveInput } from './selector-recovery.js';
+// Re-exported for back-compat with older consumers of tools.ts. New code
+// should import from selector-recovery.ts directly.
+export { recoverResolve, type ResolveInput };
 import type { Assertion, Scenario, SelectorRecord, TraceStep, CaptureSource, CompareRelation } from './trace.js';
 import { baseLocator } from './replay.js';
 import { detectUniqueField, generateUnique } from './unique-data.js';
@@ -40,21 +40,22 @@ const OUTCOME_RETRY_CAP = 2;
 const CLOSEOUT_GRACE = 4;
 
 /**
- * Heal cap: how many times a selector that FAILS TO RESOLVE is re-resolved
+ * Recovery cap: how many times a selector that FAILS TO RESOLVE is re-resolved
  * against the live page before the run gives up and records it as a finding.
- * Small on purpose so a genuinely-missing element cannot loop. Healing is scoped
- * to locators only — an assertion that fails (element found, value/state wrong)
- * is NEVER healed, because that may be a real regression. See resolveAndRecord
- * (the locate path) versus assertWithRetryCap (the assertion path).
+ * Small on purpose so a genuinely-missing element cannot loop. Selector recovery
+ * is scoped to locators only — an assertion that fails (element found,
+ * value/state wrong) is NEVER recovered, because that may be a real regression.
+ * See resolveAndRecord (the locate path) versus assertWithRetryCap (the
+ * assertion path).
  */
-const HEAL_CAP = 2;
+const RECOVERY_CAP = 2;
 
 /**
- * Thrown by resolveAndRecord when a selector could not be resolved OR healed
- * after HEAL_CAP attempts. The finding is already recorded and further actions
- * are already blocked by the time this is thrown, so callers (including the
- * assertion retry-cap) must pass it straight through without double-counting it
- * as an assertion failure.
+ * Thrown by resolveAndRecord when a selector could not be resolved OR recovered
+ * after RECOVERY_CAP attempts. The finding is already recorded and further
+ * actions are already blocked by the time this is thrown, so callers (including
+ * the assertion retry-cap) must pass it straight through without double-counting
+ * it as an assertion failure.
  */
 export class LocatorFindingError extends Error {
   constructor(message: string) {
@@ -145,19 +146,21 @@ export interface ToolContext {
    */
   findings: Array<{ scenario: string; category?: string; expected: string; url: string; messages: string[] }>;
   /**
-   * Heal cap: how many times each selector (by signature) has failed to resolve
-   * AND failed to heal in a row. A selector that heals successfully never
-   * accumulates (it is recovered and the run moves on). A selector that keeps
-   * failing to resolve trips HEAL_CAP and becomes a finding. Keyed by selector
-   * signature.
+   * Recovery attempts: how many times each selector (by signature) has failed to
+   * resolve AND failed to recover in a row. A selector that recovers
+   * successfully never accumulates (the run moves on). A selector that keeps
+   * failing to resolve trips RECOVERY_CAP and becomes a finding. Keyed by
+   * selector signature.
    */
-  _healAttempts: Map<string, number>;
+  _recoveryAttempts: Map<string, number>;
   /**
-   * Selector heals applied this run: a locator that failed to resolve was
-   * re-resolved by the ladder and found a different way, so exploration
-   * continued. Each is a distinct, visible event surfaced in the run output and
-   * carried into the RunReport so a human can see exactly what was healed. Purely
-   * a locator recovery — assertions are never healed.
+   * In-run selector recoveries applied this run: a locator that failed to
+   * resolve was re-resolved by the ladder and found a different way, so
+   * exploration continued. Each is a distinct, visible event surfaced in the run
+   * output and carried into the RunReport so a human can see exactly what was
+   * recovered. Purely a locator recovery — assertions are never recovered. The
+   * field keeps its `heals` name because RunReport.heals and the dashboard's
+   * 'heal' event consume it.
    */
   heals: Array<{ scenario?: string; intent: string; from: string; to: string }>;
 }
@@ -192,7 +195,7 @@ export function createContext(page: Page, maxSteps: number): ToolContext {
     _assertFailures: new Map(),
     _blockUntilNewScenario: false,
     findings: [],
-    _healAttempts: new Map(),
+    _recoveryAttempts: new Map(),
     heals: [],
   };
   attachDiagnostics(ctx);
@@ -564,11 +567,12 @@ async function resolveAndRecord(
   }
   // The selector FAILED TO RESOLVE — the element cannot be found with the hints
   // the model gave. That is always a locator problem, never a real bug, so it is
-  // safe to automatically re-resolve against the live page and heal. This is the
-  // ONLY place healing happens: an assertion whose value/state is wrong throws
-  // from expect() in executeAssertion, never from here, and is never healed.
+  // safe to automatically re-resolve against the live page and recover. This is
+  // the ONLY place selector recovery happens: an assertion whose value/state is
+  // wrong throws from expect() in executeAssertion, never from here, and is
+  // never recovered.
   if (!resolved) {
-    return await healOrFinding(ctx, input);
+    return await recoverOrFinding(ctx, input);
   }
   return finalizeRecord(ctx, input, resolved);
 }
@@ -587,6 +591,7 @@ async function finalizeRecord(
       arg: resolved.arg,
       intent: input.intent,
       ambiguous: resolved.ambiguous || undefined,
+      filterText: resolved.filterText,
       frameChain,
       elementKey: await elementKeyFor(resolved.locator, frameChain),
     },
@@ -595,46 +600,46 @@ async function finalizeRecord(
 }
 
 /**
- * A selector that failed the normal resolve. Try to HEAL it: re-resolve against
- * the live page by the semantic intent alone, dropping the specific hints the
- * model gave (a wrong or stale role/label/testid/css can suppress the ladder's
- * semantic match — dropping it lets the element be found a different, stable
- * way). If that succeeds, log a distinct heal event and continue. If it does not,
- * count the failure; once a selector has failed to heal HEAL_CAP times, record it
- * as a finding (never a silent pass) and block further actions until the next
- * scenario, exactly like a capped assertion.
+ * A selector that failed the normal resolve. Try to RECOVER it: re-resolve
+ * against the live page by the semantic intent alone, dropping the specific
+ * hints the model gave (a wrong or stale role/label/testid/css can suppress the
+ * ladder's semantic match — dropping it lets the element be found a different,
+ * stable way). If that succeeds, log a distinct recovery event and continue. If
+ * it does not, count the failure; once a selector has failed to recover
+ * RECOVERY_CAP times, record it as a finding (never a silent pass) and block
+ * further actions until the next scenario, exactly like a capped assertion.
  */
-async function healOrFinding(
+async function recoverOrFinding(
   ctx: ToolContext,
   input: ResolveInput,
 ): Promise<{ record: SelectorRecord; loc: import('@playwright/test').Locator }> {
-  const healed = await healResolve(ctx.page, input);
-  if (healed) {
-    const result = await finalizeRecord(ctx, input, healed);
+  const recovered = await recoverResolve(ctx.page, input);
+  if (recovered) {
+    const result = await finalizeRecord(ctx, input, recovered);
     const from = describeSelector(input);
     const to = describeResolved(result.record);
     // Only log when the element was genuinely found a DIFFERENT way than asked.
     if (from !== to) {
       ctx.heals.push({ scenario: ctx.current?.name, intent: input.intent, from, to });
     }
-    // A heal recovered the selector, so its failure streak resets.
-    ctx._healAttempts.delete(selectorSignature(input));
+    // A recovery repaired the selector, so its failure streak resets.
+    ctx._recoveryAttempts.delete(selectorSignature(input));
     return result;
   }
 
   const sig = selectorSignature(input);
-  const attempts = (ctx._healAttempts.get(sig) ?? 0) + 1;
-  ctx._healAttempts.set(sig, attempts);
-  if (attempts < HEAL_CAP) {
-    // Heal budget left. Surface the failure so the model can try different hints;
-    // the next failure of the SAME selector increments toward the cap.
+  const attempts = (ctx._recoveryAttempts.get(sig) ?? 0) + 1;
+  ctx._recoveryAttempts.set(sig, attempts);
+  if (attempts < RECOVERY_CAP) {
+    // Recovery budget left. Surface the failure so the model can try different
+    // hints; the next failure of the SAME selector increments toward the cap.
     throw new Error(
       `Could not resolve element: ${input.intent} (hints: ${JSON.stringify(input)}). ` +
       `Automatic re-resolution did not find it either. Check the element exists and try different hints.`,
     );
   }
 
-  // Cap reached: the element genuinely cannot be found, even after healing.
+  // Cap reached: the element genuinely cannot be found, even after recovery.
   // Record it as a finding, drop the half-built scenario, and block further
   // actions so the model moves on instead of thrashing the same dead selector.
   const url = safeUrl(ctx.page);
@@ -645,19 +650,19 @@ async function healOrFinding(
     category: ctx.current?.category,
     expected: `locate element: ${input.intent}`,
     url,
-    messages: [`Selector could not be resolved or healed after ${HEAL_CAP} attempts (${from}).`],
+    messages: [`Selector could not be resolved or recovered after ${RECOVERY_CAP} attempts (${from}).`],
   });
   ctx.current = null;
   ctx.captures.clear();
   ctx._blockUntilNewScenario = true;
   throw new LocatorFindingError(
-    `Element "${input.intent}" could not be found or healed after ${HEAL_CAP} attempts (${from}). ` +
+    `Element "${input.intent}" could not be found or recovered after ${RECOVERY_CAP} attempts (${from}). ` +
     `This is now the recorded result for this scenario. Do NOT retry that selector. Call begin_scenario ` +
     `for a DIFFERENT planned scenario, or finish() if none remain.`,
   );
 }
 
-/** Stable signature of the selector the model asked for, for heal-attempt counting. */
+/** Stable signature of the selector the model asked for, for recovery-attempt counting. */
 function selectorSignature(input: ResolveInput): string {
   return [
     input.role ?? '', input.label ?? '', input.testid ?? '',
@@ -665,7 +670,7 @@ function selectorSignature(input: ResolveInput): string {
   ].join('|');
 }
 
-/** Human-readable description of the selector the model asked for (the "from" of a heal). */
+/** Human-readable description of the selector the model asked for (the "from" of a recovery). */
 function describeSelector(input: ResolveInput): string {
   if (input.css && input.css.trim()) return `css=${input.css.trim()}`;
   if (input.testid && input.testid.trim()) return `testid=${input.testid.trim()}`;
@@ -678,7 +683,7 @@ function describeSelector(input: ResolveInput): string {
   return `intent=${input.intent}`;
 }
 
-/** Human-readable description of what a record re-resolved to (the "to" of a heal). */
+/** Human-readable description of what a record re-resolved to (the "to" of a recovery). */
 function describeResolved(record: SelectorRecord): string {
   const arg = typeof record.arg === 'string' ? record.arg : JSON.stringify(record.arg);
   const base = `${record.level}=${arg}`;
@@ -1796,7 +1801,7 @@ async function assertWithRetryCap(ctx: ToolContext, input: AssertionInput): Prom
     if (result.ok) ctx._assertFailures.delete(sig);
     return result;
   } catch (err) {
-    // An assertion whose TARGET could not be resolved (and could not be healed)
+    // An assertion whose TARGET could not be resolved (and could not be recovered)
     // already recorded a locator finding and blocked further actions inside
     // resolveAndRecord. That is a locator problem, not an assertion regression,
     // so pass it straight through — do NOT count it as an assertion failure or

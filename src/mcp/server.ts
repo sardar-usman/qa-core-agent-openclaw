@@ -30,7 +30,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { explore } from '../agent/runtime.js';
 import { generateFromStory } from '../agent/generate.js';
-import { heal } from '../agent/heal.js';
+import { heal } from '../cli/heal.js';
 import { transcribe } from '../agent/transcriber.js';
 
 /**
