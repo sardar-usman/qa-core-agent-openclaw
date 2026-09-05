@@ -25,7 +25,7 @@ It is also Muhammad Usman's flagship portfolio project, positioning him as an AI
 |---|---|---|---|
 | 1. Planner | `src/agent/planner.ts` | Haiku ~$0.001 | One page snapshot → numbered scenario list |
 | 2. Explorer | `src/agent/runtime.ts` + `src/agent/tools.ts` | Opus ~$0.10–$0.30 | Drives Chromium via tool-use, records verified trace |
-| 3. Critic | `src/agent/critic.ts` | Sonnet ~$0.005 | Per-scenario verdict — `ship` / `weak` / `fix` |
+| 3. Critic | `src/agent/critic.ts` | Sonnet ~$0.005 | Per-scenario verdict — `pass` / `rework` / `reject`; non-pass dropped before replay |
 | 4. Reality-Check Replay | `src/agent/replay.ts` | Zero LLM | Re-runs each scenario once in a fresh context, drops failures |
 | 5. Stability Iteration | `src/agent/stability.ts` | Zero LLM | Re-runs each survivor 3× more, drops flakes |
 
@@ -76,6 +76,8 @@ Output is then transcribed by `pom.ts` (default — full POM framework) or `tran
 
 26. **SRS ingestion is additive: without `--srs`, the Planner's input and output format are byte-identical to before this phase.** With `--srs <file>` (`.md`/`.txt` direct, `.pdf` via pdf-parse, `.docx` via mammoth, 60,000-character cap), `src/agent/requirements.ts` builds a `RequirementsMap` in one Haiku call (features with per-feature rules `R1..Rn` typed validation/behavior/permission/navigation, plus roles; only what the SRS states, URLs and rules never invented; malformed JSON gets one "return only valid JSON" retry then a clear error, and `parseRequirementsResponse` is exported so the recovery path is testable offline). The map is written to `requirements-map.json`, and an SRS whose feature list comes back empty fails the run BEFORE the browser launches. In the Planner the map arrives as a second system block appended AFTER the cached base SYSTEM (cache prefix untouched): planning becomes rule-first (stated rules over DOM evidence), each rule-verifying scenario cites its rule ids in a THIRD bracket (`[login][negative][R3,R7] ...`, page-discovered scenarios use `[-]`), and the ceiling becomes up to 4 scenarios per map feature. `parsePlan` (now exported) reads the bracket into `PlannedScenario.ruleIds` and tolerates its absence: a two-bracket or legacy line parses exactly as before with NO `ruleIds` key. `--features` wins for feature selection when both are set; the map still steers rules. Rule ids carry through `Scenario.ruleIds` into the RunReport (attached by name-match in `runtime.ts`), and `src/agent/rule-coverage.ts` classifies every rule as covered / planned-but-dropped / not-planned, written to `rule-coverage.json` and printed as `Rule coverage: X of Y rules covered` with the uncovered list (the considered-not-automated report). `slimFrameworkDir` preserves `requirements-map.json` and `rule-coverage.json` alongside `run-report.json`. Locked by `smoke-srs-parse`, `smoke-plan-rule-tags` (the no-`--srs` byte-identical invariant), and `smoke-rule-coverage`.
 
+27. **The Critic's verdict array is extracted with a bracket-depth scan, and the critic gate actually enforces the verdicts.** The old parser matched the response with a lazy regex (`/\[[\s\S]*?\]/`), which ends at the FIRST `]` in the text. Every verdict object contains nested arrays (`reasons`, `required_fixes`), so the match always truncated inside the first object, `JSON.parse` threw, the catch returned `[]`, and every run since the format was defined reported 0 verdicts while the `<summary>` paragraph parsed fine. With 0 verdicts the gate in `runtime.ts` never dropped a rework/reject scenario, so the Critic's spend bought only the summary. `parseVerdicts` (exported, `critic.ts`) now removes the `<summary>` block first (its prose may contain brackets), strips code fences, and finds the first balanced top-level JSON array with a depth scan that honors string literals and escapes, so a bracket inside a quoted reason (the Critic often quotes `[no-timeout]`) cannot end the array, and a bracketed fragment in the preamble is skipped because the candidate must parse as JSON and contain a verdict-shaped object. A malformed or truncated response still returns `[]` and never throws, and the runtime now prints a loud warning when the Critic call succeeded but zero verdicts parsed, instead of showing "0 verdicts" as if normal. The gate itself is the exported `gateByVerdicts` (`critic.ts`): rework/reject names are dropped before Reality-Check, the drop is named in reconciliation as a `[critic]` drop (already locked by `smoke-reconcile`), and in an SRS run the gated scenario's rules classify planned-but-dropped in rule coverage. Do not swap the depth scan back to a regex, and do not let a zero-verdict result pass silently. Locked by `smoke-critic-parse`.
+
 ---
 
 ## Standard verification (run before claiming "done")
@@ -99,7 +101,8 @@ for s in smoke-tools smoke-finish smoke-hascount smoke-planner-parse \
          smoke-table-gate smoke-circular smoke-compare-poll smoke-iframe \
          smoke-planner-iframe smoke-frame-value smoke-fill-verify \
          smoke-pom-ambiguous smoke-filter-disambiguation smoke-selector-recovery \
-         smoke-srs-parse smoke-plan-rule-tags smoke-rule-coverage; do
+         smoke-srs-parse smoke-plan-rule-tags smoke-rule-coverage \
+         smoke-critic-parse; do
   echo "=== $s ==="
   npx tsx scripts/$s.ts
 done

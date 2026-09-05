@@ -164,31 +164,106 @@ function describeStep(step: TraceStep): string {
   }
 }
 
-function parseVerdicts(text: string): ScenarioVerdict[] {
-  // Strip markdown code fences if the model wrapped the JSON
-  const stripped = text.replace(/```json\s*/gi, '').replace(/```\s*/g, '');
-  // Match the outermost JSON array
-  const m = stripped.match(/\[[\s\S]*?\]/);
-  if (!m) return [];
-  try {
-    const raw = JSON.parse(m[0]) as unknown[];
-    return raw
-      .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
-      .map((item) => ({
-        scenario: String(item['scenario'] ?? ''),
-        verdict: (['pass', 'rework', 'reject'].includes(String(item['verdict']))
-          ? item['verdict']
-          : 'rework') as Verdict,
-        reasons: Array.isArray(item['reasons'])
-          ? (item['reasons'] as unknown[]).map(String)
-          : [String(item['reasons'] ?? '')],
-        required_fixes: Array.isArray(item['required_fixes'])
-          ? (item['required_fixes'] as unknown[]).map(String)
-          : [],
-      }));
-  } catch {
-    return [];
+/**
+ * Parse the per-scenario verdict array out of the Critic's response.
+ *
+ * A regex cannot extract this array: every verdict object contains nested
+ * arrays (reasons, required_fixes), so a lazy match ends inside the first
+ * object at the first "]", and a greedy match can run into stray brackets in
+ * the prose around the array. The old lazy regex truncated on every
+ * well-formed response, so every run reported 0 verdicts and the critic gate
+ * never dropped anything. The summary block is removed first (its prose may
+ * contain brackets), fences are stripped, then a bracket-depth scan finds the
+ * first balanced top-level array that parses as JSON and contains at least
+ * one verdict-shaped object. A malformed response returns [] and never throws.
+ */
+export function parseVerdicts(text: string): ScenarioVerdict[] {
+  const withoutSummary = text.replace(/<summary>[\s\S]*?<\/summary>/gi, '');
+  const stripped = withoutSummary.replace(/```json\s*/gi, '').replace(/```\s*/g, '');
+  const raw = extractVerdictArray(stripped);
+  if (!raw) return [];
+  return raw
+    .filter((item): item is Record<string, unknown> => typeof item === 'object' && item !== null)
+    .map((item) => ({
+      scenario: String(item['scenario'] ?? ''),
+      verdict: (['pass', 'rework', 'reject'].includes(String(item['verdict']))
+        ? item['verdict']
+        : 'rework') as Verdict,
+      reasons: Array.isArray(item['reasons'])
+        ? (item['reasons'] as unknown[]).map(String)
+        : [String(item['reasons'] ?? '')],
+      required_fixes: Array.isArray(item['required_fixes'])
+        ? (item['required_fixes'] as unknown[]).map(String)
+        : [],
+    }));
+}
+
+/**
+ * Find the first balanced top-level JSON array in the text that parses and
+ * holds at least one object with a "scenario" key. The depth scan honors
+ * string literals and escapes, so a bracket inside a quoted reason (the
+ * Critic often quotes "[no-timeout]") does not end the array. A bracketed
+ * fragment in the preamble ("scenario [login] ...") fails the parse or the
+ * shape check and the scan moves to the next candidate.
+ */
+function extractVerdictArray(text: string): unknown[] | null {
+  let from = 0;
+  for (;;) {
+    const start = text.indexOf('[', from);
+    if (start === -1) return null;
+    const end = balancedArrayEnd(text, start);
+    if (end !== -1) {
+      try {
+        const v = JSON.parse(text.slice(start, end + 1)) as unknown;
+        if (Array.isArray(v) && v.some((x) => typeof x === 'object' && x !== null && 'scenario' in x)) {
+          return v;
+        }
+      } catch {
+        // Not JSON from this bracket; try the next one.
+      }
+    }
+    from = start + 1;
   }
+}
+
+/** Index of the "]" closing the array opened at `start`, or -1 if unbalanced. */
+function balancedArrayEnd(text: string, start: number): number {
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (escaped) { escaped = false; continue; }
+    if (inString) {
+      if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') inString = true;
+    else if (ch === '[') depth++;
+    else if (ch === ']') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Apply the Critic's verdicts: rework and reject scenarios are dropped before
+ * Reality-Check, pass scenarios continue. A verdict whose scenario name
+ * matches no recorded scenario drops nothing (the prompt requires the exact
+ * input name back).
+ */
+export function gateByVerdicts<S extends { name: string }>(
+  scenarios: S[],
+  verdicts: ScenarioVerdict[],
+): { kept: S[]; dropped: string[] } {
+  const dropSet = new Set(verdicts.filter((v) => v.verdict !== 'pass').map((v) => v.scenario));
+  return {
+    kept: scenarios.filter((s) => !dropSet.has(s.name)),
+    dropped: scenarios.filter((s) => dropSet.has(s.name)).map((s) => s.name),
+  };
 }
 
 function parseSummary(text: string): string {

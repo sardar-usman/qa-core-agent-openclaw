@@ -6,7 +6,7 @@ import { createContext, runTool, TOOL_DEFS, type ToolContext } from './tools.js'
 import type { RunReport, Scenario } from './trace.js';
 import { renderMemoryBlock, saveRun, type RunSummary } from './memory.js';
 import { plan, type PlannedScenario } from './planner.js';
-import { critique } from './critic.js';
+import { critique, gateByVerdicts } from './critic.js';
 import { replay, type ReplayEvent } from './replay.js';
 import { stability, type StabilityEvent } from './stability.js';
 import { reconcile } from './reconcile.js';
@@ -499,6 +499,15 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
       review = { verdicts: c.verdicts, summary: c.summary };
       cost.criticUsd = c.costUsd;
       opts.onEvent?.({ type: 'critic_done', verdicts: c.verdicts, usd: c.costUsd });
+      if (c.verdicts.length === 0) {
+        // The call succeeded and was paid for, but nothing parsed. That means
+        // the response format drifted and the critic gate cannot act this run.
+        // Say so loudly instead of printing "0 verdicts" as if it were normal.
+        opts.onEvent?.({
+          type: 'message',
+          text: `Warning: Critic reviewed ${scenarios.length} scenario(s) but returned no parseable verdicts. The critic gate is inactive for this run. Check parseVerdicts in critic.ts against the response format.`,
+        });
+      }
     } catch (err) {
       opts.onEvent?.({ type: 'message', text: `Critic skipped: ${(err as Error).message}` });
     }
@@ -508,16 +517,12 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
   // Only 'pass' scenarios proceed to Reality-Check (Step 4).
   let scenariosForReplay = scenarios;
   if (review && !opts.skipCritic) {
-    const dropSet = new Set(
-      review.verdicts
-        .filter((v) => v.verdict !== 'pass')
-        .map((v) => v.scenario),
-    );
-    if (dropSet.size > 0) {
-      scenariosForReplay = scenarios.filter((s) => !dropSet.has(s.name));
+    const gated = gateByVerdicts(scenarios, review.verdicts);
+    if (gated.dropped.length > 0) {
+      scenariosForReplay = gated.kept;
       opts.onEvent?.({
         type: 'message',
-        text: `Critic gated out ${dropSet.size} scenario(s) (rework/reject) — not sent to Reality-Check.`,
+        text: `Critic gated out ${gated.dropped.length} scenario(s) (rework/reject), not sent to Reality-Check: ${gated.dropped.map((n) => `"${n}"`).join(', ')}`,
       });
     }
   }
