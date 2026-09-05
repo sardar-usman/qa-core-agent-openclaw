@@ -23,9 +23,46 @@ export interface RuleCoverage {
 }
 
 /** The minimal scenario shape coverage needs: a name plus cited rule ids. */
-interface CitingScenario {
+export interface CitingScenario {
   name: string;
   ruleIds?: string[];
+}
+
+/**
+ * Normalize a scenario name for matching: lowercase, punctuation stripped,
+ * the articles the/a/an dropped, whitespace squashed. The same treatment
+ * canonicalIntent gives selector intents, so a small rephrase by the Explorer
+ * still keys to the planned name.
+ */
+const ARTICLES = new Set(['the', 'a', 'an']);
+function nameKey(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w && !ARTICLES.has(w))
+    .join(' ');
+}
+
+/**
+ * Copy each planned scenario's rule citations onto the emitted scenario that
+ * fulfilled it. Names are compared via nameKey, exact first, then containment
+ * either way, because the Explorer occasionally rephrases a planned name
+ * slightly. A scenario with no matching plan entry, or whose plan entry cited
+ * no rules, is left untouched.
+ */
+export function attachRuleIds(scenarios: CitingScenario[], planned: CitingScenario[]): void {
+  for (const s of scenarios) {
+    const k = nameKey(s.name);
+    if (!k) continue;
+    const match =
+      planned.find((p) => nameKey(p.name) === k) ??
+      planned.find((p) => {
+        const pk = nameKey(p.name);
+        return pk.length > 0 && (k.includes(pk) || pk.includes(k));
+      });
+    if (match?.ruleIds && match.ruleIds.length > 0) s.ruleIds = [...match.ruleIds];
+  }
 }
 
 export function computeRuleCoverage(opts: {

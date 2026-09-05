@@ -10,7 +10,7 @@ import { critique } from './critic.js';
 import { replay, type ReplayEvent } from './replay.js';
 import { stability, type StabilityEvent } from './stability.js';
 import { reconcile } from './reconcile.js';
-import { computeRuleCoverage, renderRuleCoverage } from './rule-coverage.js';
+import { attachRuleIds, computeRuleCoverage, renderRuleCoverage } from './rule-coverage.js';
 import type { RequirementsMap } from './requirements.js';
 import { installEvalShim } from './eval-shim.js';
 import type { CascadeLevel } from './selectors.js';
@@ -796,28 +796,6 @@ function scenariosToCsv(url: string, scenarios: PlannedScenario[]): string {
     })),
     ['#', 'Category', 'Scenario', 'Rationale', 'Approve'],
   );
-}
-
-/**
- * Copy each planned scenario's rule citations onto the emitted scenario that
- * fulfilled it. Matching is by normalized name (exact first, then containment
- * either way — the Explorer occasionally rephrases a planned name slightly).
- * A scenario with no matching plan entry, or whose plan entry cited no rules,
- * is left untouched.
- */
-function attachRuleIds(scenarios: Scenario[], planned: PlannedScenario[]): void {
-  const key = (s: string): string => s.toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
-  for (const s of scenarios) {
-    const k = key(s.name);
-    if (!k) continue;
-    const match =
-      planned.find((p) => key(p.name) === k) ??
-      planned.find((p) => {
-        const pk = key(p.name);
-        return pk.length > 0 && (k.includes(pk) || pk.includes(k));
-      });
-    if (match?.ruleIds && match.ruleIds.length > 0) s.ruleIds = [...match.ruleIds];
-  }
 }
 
 /** Walk every scenario's trace and collect the intent + cascade level each selector resolved at. */

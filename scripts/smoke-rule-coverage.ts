@@ -8,7 +8,7 @@
  *
  * Pure in-code fixtures. No network. No LLM. No browser.
  */
-import { computeRuleCoverage, renderRuleCoverage } from '../src/agent/rule-coverage.js';
+import { attachRuleIds, computeRuleCoverage, renderRuleCoverage } from '../src/agent/rule-coverage.js';
 import type { RequirementsMap } from '../src/agent/requirements.js';
 
 let pass = 0;
@@ -99,6 +99,22 @@ const full = computeRuleCoverage({
 });
 check('E1. all four covered', full.covered.length === 4 && full.uncovered.length === 0);
 check('E2. rendered summary is a single line when nothing is uncovered', renderRuleCoverage(full).length === 1);
+
+/* ─── F. attachRuleIds tolerates a renamed scenario ────────────────────────── */
+// The Explorer rephrased the planned names: casing, punctuation, and the
+// articles the/a/an differ, and one name grew a trailing clause. The rule
+// citations must still land.
+const renamed: { name: string; ruleIds?: string[] } = { name: 'Rejected 5-character password.' };
+const grown: { name: string; ruleIds?: string[] } = { name: 'landed on the dashboard after login and saw the greeting' };
+const unplanned: { name: string; ruleIds?: string[] } = { name: 'checkout applies the discount code' };
+const ruleless: { name: string; ruleIds?: string[] } = { name: 'password field masks input' };
+attachRuleIds([renamed, grown, unplanned, ruleless], planned);
+check('F1. renamed scenario (article and punctuation drift) still gets its rule ids',
+  JSON.stringify(renamed.ruleIds) === '["R1"]', JSON.stringify(renamed));
+check('F2. a name that grew a trailing clause matches by containment',
+  JSON.stringify(grown.ruleIds) === '["R2"]', JSON.stringify(grown));
+check('F3. a scenario with no plan entry stays untouched', unplanned.ruleIds === undefined, JSON.stringify(unplanned));
+check('F4. a plan entry that cited no rules attaches nothing', ruleless.ruleIds === undefined, JSON.stringify(ruleless));
 
 console.log(`\n${pass}/${pass + fail} checks passed.`);
 if (fail > 0) process.exit(1);
