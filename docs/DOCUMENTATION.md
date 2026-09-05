@@ -256,7 +256,7 @@ Top-level `cache_control: { type: 'ephemeral' }` on each block — repeat runs a
 
 **File:** [`src/agent/critic.ts`](../src/agent/critic.ts)
 
-**Job:** Read the recorded scenarios and grade each one with a verdict — **ship** / **weak** / **fix** — plus a one-line reason and a paragraph summary.
+**Job:** Read the recorded scenarios and grade each one with a verdict, **pass** / **rework** / **reject**, plus structured reasons, concrete required fixes, and a paragraph summary.
 
 **Why a separate Critic:** It's much harder for the same agent to honestly review its own work than for a separate agent with a different role and (separate) model to do so. The Critic is also where you'd add reviewer-style policies that the Explorer shouldn't see (e.g., "if this assertion is just `toBeVisible()`, that's weak").
 
@@ -266,8 +266,9 @@ Top-level `cache_control: { type: 'ephemeral' }` on each block — repeat runs a
 ```typescript
 interface ScenarioVerdict {
   scenario: string;
-  verdict: 'ship' | 'weak' | 'fix';
-  reason: string;
+  verdict: 'pass' | 'rework' | 'reject';
+  reasons: string[];
+  required_fixes: string[];
 }
 ```
 
@@ -275,9 +276,13 @@ interface ScenarioVerdict {
 
 | Verdict | Meaning |
 |---|---|
-| `ship` | The scenario tests something meaningful and the assertion is specific enough to catch a real bug |
-| `weak` | The scenario runs but the assertion is too loose (asserts the page is visible but not that the right outcome happened) |
-| `fix` | The assertion is wrong, missing, or tests something orthogonal to the scenario name |
+| `pass` | The assertion is specific, auto-retrying, and would fail when the feature breaks. Proceeds to Reality-Check |
+| `rework` | The scenario tests something real but the assertion, wait strategy, or locator is wrong. `required_fixes` says exactly what to change |
+| `reject` | Not worth keeping: redundant, impossible, tests nothing meaningful, or the name does not match what was tested |
+
+**The gate:** `rework` and `reject` scenarios are dropped before Reality-Check (`gateByVerdicts` in `critic.ts`, applied in `runtime.ts`). Every dropped scenario is named in the reconciliation funnel as a `[critic]` drop, and in an SRS run its cited rules classify as planned-but-dropped in the rule-coverage report. Only `pass` scenarios reach replay.
+
+**Response parsing:** The verdict array is extracted with a bracket-depth scan (`parseVerdicts`, exported from `critic.ts`) that honors string literals, skips the `<summary>` block, and handles fenced responses. An earlier lazy regex truncated at the first `]`, which is always inside the first verdict's nested `reasons` array, so every run reported 0 verdicts and the gate never fired. A malformed response returns no verdicts without throwing, and the runtime prints a warning that the gate is inactive for that run. Locked by `scripts/smoke-critic-parse.ts`.
 
 **Typical cost:** ~$0.005 per run · ~5s wall clock
 

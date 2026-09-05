@@ -2660,6 +2660,10 @@
   .verdict-line .v.ship { background: var(--emerald-soft); color: var(--emerald); }
   .verdict-line .v.weak { background: var(--amber-soft); color: var(--amber); }
   .verdict-line .v.fix  { background: var(--rose-soft); color: var(--rose); }
+  /* Real Critic verdict values (pass/rework/reject); ship/weak/fix kept for demo data. */
+  .verdict-line .v.pass   { background: var(--emerald-soft); color: var(--emerald); }
+  .verdict-line .v.rework { background: var(--amber-soft); color: var(--amber); }
+  .verdict-line .v.reject { background: var(--rose-soft); color: var(--rose); }
 
   .run-card-actions {
     display: flex;
@@ -4360,9 +4364,12 @@ function renderRunHistory() {
 
 function runCardHtml(r) {
   const verdicts = (r.verdicts && r.verdicts.length)
-    ? `<div class="run-card-verdicts">${r.verdicts.slice(0, 6).map(v => `
-        <div class="verdict-line"><span class="v ${escAttr(v.verdict)}">${escHtml(v.verdict)}</span><span>${escHtml(v.scenario || '')}${v.reason ? '. ' + escHtml(v.reason) : ''}</span></div>
-      `).join('')}</div>`
+    ? `<div class="run-card-verdicts">${r.verdicts.slice(0, 6).map(v => {
+        // Real Critic verdicts carry a reasons array; demo data carries a reason string.
+        const why = v.reason || (Array.isArray(v.reasons) ? v.reasons.join('; ') : '');
+        return `
+        <div class="verdict-line"><span class="v ${escAttr(v.verdict)}">${escHtml(v.verdict)}</span><span>${escHtml(v.scenario || '')}${why ? '. ' + escHtml(why) : ''}</span></div>
+      `;}).join('')}</div>`
     : '';
   // Reality-check + stability + diagnostics lines (only when present).
   const stabilityLine = r.stability
