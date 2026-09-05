@@ -10,8 +10,10 @@ import { critique, gateByVerdicts } from './critic.js';
 import { replay, type ReplayEvent } from './replay.js';
 import { stability, type StabilityEvent } from './stability.js';
 import { reconcile } from './reconcile.js';
-import { attachRuleIds, computeRuleCoverage, renderRuleCoverage } from './rule-coverage.js';
+import { attachRuleIds, computeDerivation, computeRuleCoverage, renderRuleCoverage } from './rule-coverage.js';
 import type { RequirementsMap } from './requirements.js';
+import { discoverPages } from './discovery.js';
+import { filterPages, MAX_PAGES_WITH_FEATURES } from './page-filter.js';
 import { installEvalShim } from './eval-shim.js';
 import type { CascadeLevel } from './selectors.js';
 import { writeCsv } from './csv.js';
@@ -176,7 +178,27 @@ export interface ExploreOptions {
    * (report.ruleCoverage + rule-coverage.json in the output directory).
    */
   requirements?: RequirementsMap;
+  /**
+   * Multi-page discovery (--discover). Discovery activates when this is set,
+   * OR when `urls` is non-empty, OR when `requirements` is present. Without
+   * all three, behavior is byte-identical to single-entry-page runs.
+   */
+  discover?: boolean;
+  /** Explicit page list from --urls. Feeds the discovery ladder's user rung. */
+  urls?: string[];
   onEvent?: (event: AgentEvent) => void;
+}
+
+/** Cap on scenarios planned per discovered page. */
+export const PER_PAGE_SCENARIO_CAP = 4;
+/** Global cap on planned scenarios per run; planning stops once reached. */
+export const GLOBAL_PLAN_CAP = 20;
+
+/** A requirements map narrowed to one feature, for per-page rule context. */
+function subMapFor(map: RequirementsMap | undefined, feature: string | undefined): RequirementsMap | undefined {
+  if (!map || !feature) return map;
+  const matched = map.features.filter((f) => f.name === feature);
+  return matched.length > 0 ? { ...map, features: matched } : map;
 }
 
 /**
@@ -284,7 +306,9 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
   const maxStepsOverride =
     opts.maxSteps ?? (process.env.QA_CORE_MAX_STEPS ? Number(process.env.QA_CORE_MAX_STEPS) : undefined);
   const maxUsd = opts.maxUsd ?? Number(process.env.QA_CORE_MAX_USD ?? 2);
-  const model = opts.model ?? process.env.QA_CORE_MODEL_EXPLORE ?? 'claude-opus-4-7';
+  // Both env names are honored: QA_CORE_EXPLORER_MODEL (documented) and the
+  // older QA_CORE_MODEL_EXPLORE. Default unchanged.
+  const model = opts.model ?? process.env.QA_CORE_EXPLORER_MODEL ?? process.env.QA_CORE_MODEL_EXPLORE ?? 'claude-opus-4-7';
   const price = priceFor(model);
 
   const client = new Anthropic({ apiKey });
@@ -305,7 +329,147 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
     fillableFields: 0,
   };
 
-  if (!opts.fromPlan && !opts.skipPlan) {
+  // Multi-page discovery activates ONLY when the caller asked for it via
+  // --discover, --urls, or --srs. With none of the three, the single plan()
+  // call below runs exactly as before, byte for byte.
+  const discoveryActive =
+    !opts.fromPlan && !opts.skipPlan &&
+    Boolean(opts.discover || (opts.urls && opts.urls.length > 0) || opts.requirements);
+  let discoveryInfo: RunReport['discovery'];
+  // True when planning stopped at a scenario cap (per-page or global). Turns
+  // derivation skips into 'budget' instead of 'no-matching-control'.
+  let planCapHit = false;
+
+  if (discoveryActive) {
+    opts.onEvent?.({ type: 'plan_started' });
+    const disc = await discoverPages({
+      entryUrl: opts.url,
+      requirements: opts.requirements,
+      userUrls: opts.urls,
+    });
+    for (const w of disc.warnings) {
+      opts.onEvent?.({ type: 'message', text: `discovery: ${w}` });
+    }
+
+    // Relevance filter — only the remote-discovered sets (sitemap/crawl) are
+    // trimmed. SRS pages are stated requirements and user pages are explicit
+    // intent; both pass through whole.
+    let pages = disc.pages;
+    let plannerUsd = 0;
+    if (disc.method === 'sitemap' || disc.method === 'crawl') {
+      const featureNames = opts.requirements
+        ? opts.requirements.features.map((f) => f.name)
+        : opts.features;
+      const filtered = await filterPages({ pages, features: featureNames, apiKey });
+      plannerUsd += filtered.costUsd;
+      if (filtered.method !== 'passthrough') {
+        opts.onEvent?.({
+          type: 'message',
+          text: `discovery: ${pages.length} page(s) narrowed to ${filtered.pages.length} (${filtered.method === 'llm' ? 'relevance pick' : 'deterministic fallback'})`,
+        });
+      }
+      pages = filtered.pages;
+    } else if (pages.length > MAX_PAGES_WITH_FEATURES) {
+      opts.onEvent?.({
+        type: 'message',
+        text: `discovery: ${pages.length} ${disc.method} page(s) kept in full; planning stops at the ${GLOBAL_PLAN_CAP}-scenario cap, so later pages may not be reached.`,
+      });
+    }
+    opts.onEvent?.({ type: 'message', text: `discovery: ${pages.length} page(s) via ${disc.method}` });
+    discoveryInfo = { method: disc.method, pages, warnings: disc.warnings };
+
+    // Per-page planning: up to PER_PAGE_SCENARIO_CAP scenarios per page,
+    // GLOBAL_PLAN_CAP total. Cost is itemized per page. A page whose plan
+    // fails is skipped with a message; the other pages still plan.
+    const combined: PlannedScenario[] = [];
+    const combinedDropped: Array<{ scenario: PlannedScenario; duplicateOf: PlannedScenario }> = [];
+    const combinedRejected: Array<{ scenario: PlannedScenario; reason: string }> = [];
+    let fillableMax = 0;
+    for (const [idx, pg] of pages.entries()) {
+      if (combined.length >= GLOBAL_PLAN_CAP) {
+        planCapHit = true;
+        opts.onEvent?.({
+          type: 'message',
+          text: `Planner: global cap of ${GLOBAL_PLAN_CAP} scenarios reached; ${pages.length - idx} page(s) not planned.`,
+        });
+        break;
+      }
+      let p: Awaited<ReturnType<typeof plan>>;
+      try {
+        p = await plan({
+          url: pg.url,
+          apiKey,
+          features: pg.feature ? [pg.feature] : opts.features,
+          requirements: subMapFor(opts.requirements, pg.feature),
+        });
+      } catch (err) {
+        opts.onEvent?.({
+          type: 'message',
+          text: `Planner failed on ${pg.url} (${(err as Error).message}); page skipped.`,
+        });
+        continue;
+      }
+      let scen = p.scenarios.map((s): PlannedScenario => ({
+        ...s,
+        pageUrl: pg.url,
+        ...(pg.feature && !s.feature ? { feature: pg.feature } : {}),
+      }));
+      if (scen.length > PER_PAGE_SCENARIO_CAP) {
+        planCapHit = true;
+        opts.onEvent?.({
+          type: 'message',
+          text: `Planner: ${pg.url} planned ${scen.length} scenarios, trimmed to the per-page cap of ${PER_PAGE_SCENARIO_CAP}.`,
+        });
+        scen = scen.slice(0, PER_PAGE_SCENARIO_CAP);
+      }
+      const room = GLOBAL_PLAN_CAP - combined.length;
+      if (scen.length > room) { planCapHit = true; scen = scen.slice(0, room); }
+      combined.push(...scen);
+      combinedDropped.push(...p.dropped);
+      combinedRejected.push(...p.rejected);
+      fillableMax = Math.max(fillableMax, p.fillableFields);
+      plannerUsd += p.costUsd;
+      opts.onEvent?.({
+        type: 'message',
+        text: `Planner [${idx + 1}/${pages.length}] ${pg.url}: ${scen.length} scenario(s) · $${p.costUsd.toFixed(4)}`,
+      });
+    }
+
+    if (combined.length === 0) {
+      throw new Error(
+        `Planner produced 0 scenarios across ${pages.length} discovered page(s) for ${opts.url}. ` +
+          `Stopping the run rather than letting the Explorer improvise without a plan.`,
+      );
+    }
+    planResult = { scenarios: combined, usd: plannerUsd, fillableFields: fillableMax };
+    opts.onEvent?.({ type: 'plan_done', scenarios: combined, usd: plannerUsd });
+    for (const d of combinedDropped) {
+      opts.onEvent?.({
+        type: 'message',
+        text: `Dropped near-duplicate scenario: "${d.scenario.name}" (same value + relation as "${d.duplicateOf.name}")`,
+      });
+    }
+    for (const r of combinedRejected) {
+      opts.onEvent?.({
+        type: 'message',
+        text: `Rejected circular scenario: "${r.scenario.name}" — ${r.reason}`,
+      });
+    }
+    if (opts.review) {
+      fs.mkdirSync(opts.outDir, { recursive: true });
+      const planPath = path.join(opts.outDir, 'plan.csv');
+      fs.writeFileSync(planPath, scenariosToCsv(opts.url, combined));
+      opts.onEvent?.({ type: 'review_paused', planPath, scenarios: combined });
+      return {
+        paused: true,
+        planPath,
+        scenarios: combined,
+        outDir: opts.outDir,
+        url: opts.url,
+        language: opts.language,
+      };
+    }
+  } else if (!opts.fromPlan && !opts.skipPlan) {
     opts.onEvent?.({ type: 'plan_started' });
     // A planner failure in the default path is fatal. We do NOT swallow it and
     // fall back to a blind Explorer run — improvising without a plan is exactly
@@ -721,6 +885,7 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
   const report: RunReport = {
     url: opts.url,
     language: opts.language,
+    ...(discoveryInfo ? { discovery: discoveryInfo } : {}),
     scenarios: emittedScenarios,
     cascadeStats,
     cost,
@@ -746,11 +911,21 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
   // or not-planned. Attached to the report and written to its own file so the
   // "considered, not automated" list survives alongside run-report.json.
   if (opts.requirements) {
-    report.ruleCoverage = computeRuleCoverage({
-      map: opts.requirements,
-      planned: planResult.scenarios,
-      scenarios: emittedScenarios,
-    });
+    report.ruleCoverage = {
+      ...computeRuleCoverage({
+        map: opts.requirements,
+        planned: planResult.scenarios,
+        scenarios: emittedScenarios,
+      }),
+      // Derivation: which checklist categories produced scenarios per feature
+      // and which were skipped, with the reason. The considered-not-automated
+      // record alongside the rule list.
+      derivation: computeDerivation({
+        map: opts.requirements,
+        planned: planResult.scenarios,
+        budgetHit: planCapHit,
+      }),
+    };
     for (const line of renderRuleCoverage(report.ruleCoverage)) {
       opts.onEvent?.({ type: 'message', text: line });
     }
@@ -788,18 +963,26 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
   return report;
 }
 
-/** Convert planned scenarios to a reviewable CSV. */
+/**
+ * Convert planned scenarios to a reviewable CSV. A Page column is added only
+ * when a scenario carries a pageUrl (multi-page discovery), so single-page
+ * review CSVs keep their exact pre-discovery shape.
+ */
 function scenariosToCsv(url: string, scenarios: PlannedScenario[]): string {
   const header = `# QA-Core review plan for ${url}\n# Set Approve=no on any row you do not want to test, then resume with:\n#   npm run explore -- --from-plan <this-file>\n\n`;
+  const multiPage = scenarios.some((s) => s.pageUrl);
   return header + writeCsv(
     scenarios.map((s, i) => ({
       '#': String(i + 1),
       Category: s.category,
       Scenario: s.name,
       Rationale: s.rationale,
+      ...(multiPage ? { Page: s.pageUrl ?? '' } : {}),
       Approve: 'yes',
     })),
-    ['#', 'Category', 'Scenario', 'Rationale', 'Approve'],
+    multiPage
+      ? ['#', 'Category', 'Scenario', 'Rationale', 'Page', 'Approve']
+      : ['#', 'Category', 'Scenario', 'Rationale', 'Approve'],
   );
 }
 
@@ -847,13 +1030,21 @@ async function runAgentLoop(args: {
   // Render the plan including each scenario's feature tag (when present) so the
   // Explorer can pass it back via begin_scenario.feature. Feature names from
   // the plan are authoritative — the agent should use them verbatim.
+  // Multi-page runs: each scenario names the page it runs on; the Explorer
+  // must start such a scenario by navigating to that URL. Single-page plans
+  // carry no pageUrl, so this text stays byte-identical without discovery.
+  const multiPage = args.plan.some((p) => p.pageUrl);
   const planText = args.plan.length > 0
     ? 'Planned scenarios (cover all of these unless a scenario is impossible from this page). ' +
       'When you call begin_scenario, set `feature` to the value in the first bracket — verbatim, kebab-case.\n' +
+      (multiPage
+        ? 'Scenarios marked "page:" run on that page. Begin each such scenario by navigating to its page URL (scenarios stay self-contained).\n'
+        : '') +
       args.plan
         .map((p, i) => {
           const tag = p.feature ? `[${p.feature}][${p.category}]` : `[${p.category}]`;
-          return `  ${i + 1}. ${tag} ${p.name} — ${p.rationale}`;
+          const pageNote = p.pageUrl ? `\n     page: ${p.pageUrl}` : '';
+          return `  ${i + 1}. ${tag} ${p.name} — ${p.rationale}${pageNote}`;
         })
         .join('\n')
     : null;

@@ -78,6 +78,10 @@ Output is then transcribed by `pom.ts` (default — full POM framework) or `tran
 
 27. **The Critic's verdict array is extracted with a bracket-depth scan, and the critic gate actually enforces the verdicts.** The old parser matched the response with a lazy regex (`/\[[\s\S]*?\]/`), which ends at the FIRST `]` in the text. Every verdict object contains nested arrays (`reasons`, `required_fixes`), so the match always truncated inside the first object, `JSON.parse` threw, the catch returned `[]`, and every run since the format was defined reported 0 verdicts while the `<summary>` paragraph parsed fine. With 0 verdicts the gate in `runtime.ts` never dropped a rework/reject scenario, so the Critic's spend bought only the summary. `parseVerdicts` (exported, `critic.ts`) now removes the `<summary>` block first (its prose may contain brackets), strips code fences, and finds the first balanced top-level JSON array with a depth scan that honors string literals and escapes, so a bracket inside a quoted reason (the Critic often quotes `[no-timeout]`) cannot end the array, and a bracketed fragment in the preamble is skipped because the candidate must parse as JSON and contain a verdict-shaped object. A malformed or truncated response still returns `[]` and never throws, and the runtime now prints a loud warning when the Critic call succeeded but zero verdicts parsed, instead of showing "0 verdicts" as if normal. The gate itself is the exported `gateByVerdicts` (`critic.ts`): rework/reject names are dropped before Reality-Check, the drop is named in reconciliation as a `[critic]` drop (already locked by `smoke-reconcile`), and in an SRS run the gated scenario's rules classify planned-but-dropped in rule coverage. Do not swap the depth scan back to a regex, and do not let a zero-verdict result pass silently. Locked by `smoke-critic-parse`.
 
+28. **Multi-page discovery never activates without `--srs`, `--urls`, or `--discover`.** With none of the three, `explore()` makes the single `plan()` call exactly as before, byte for byte: same prompt, same events, same CSV shape (the review CSV grows a Page column ONLY when a scenario carries a pageUrl). The activation condition lives in `runtime.ts` (`discoveryActive`). When active, the ladder in `src/agent/discovery.ts` decides the page set, stopping at the first rung that yields pages: SRS-stated URLs (tagged with their feature), the explicit `--urls` list, sitemap, polite crawl, entry-only. The user rung sits ABOVE sitemap/crawl on purpose: an explicit list must never be overridden by remote discovery. A sitemap/crawl set is narrowed by the page filter (`src/agent/page-filter.ts`, max 8 pages with a feature list, 5 without, deterministic shallowest-first fallback); SRS and user sets are never trimmed. Per-page planning budgets: `PER_PAGE_SCENARIO_CAP` (4) and `GLOBAL_PLAN_CAP` (20) in `runtime.ts`; hitting either turns derivation skips into `budget`. Every rung that yields nothing records what it tried in `warnings`, and the entry-only fallback names the failed rungs. Discovery never falls back silently into single-page mode. Locked by `smoke-discovery-ladder` and `smoke-page-filter`.
+
+29. **robots.txt Disallow is always honored.** Both remote rungs of the discovery ladder obey it: the sitemap rung drops disallowed paths from its page set, the crawl rung never fetches a disallowed path, and a robots file that disallows everything for our agent skips both rungs entirely, with the reason recorded in the warnings. The crawl is polite by construction: sequential (never parallel), `CRAWL_DELAY_MS` (500ms) between fetches, `DISCOVERY_UA` (`qa-core-agent-discovery`) as the user agent, plain HTTP fetch (no browser), depth cap 2, page cap 15, same-origin only, assets and fragments skipped, deduped by pathname. Do not raise the caps or drop the delay to make discovery faster; politeness is the contract that keeps the agent welcome on other people's sites. Locked by `smoke-discovery-ladder`.
+
 ---
 
 ## Standard verification (run before claiming "done")
@@ -102,7 +106,8 @@ for s in smoke-tools smoke-finish smoke-hascount smoke-planner-parse \
          smoke-planner-iframe smoke-frame-value smoke-fill-verify \
          smoke-pom-ambiguous smoke-filter-disambiguation smoke-selector-recovery \
          smoke-srs-parse smoke-plan-rule-tags smoke-rule-coverage \
-         smoke-critic-parse; do
+         smoke-critic-parse smoke-discovery-ladder smoke-page-filter \
+         smoke-derivation-report; do
   echo "=== $s ==="
   npx tsx scripts/$s.ts
 done
@@ -153,9 +158,9 @@ The Playwright MCP is the canonical "see + interact with the live UI" tool — u
 | `ANTHROPIC_API_KEY` | — | Required. Without it the agent errors at start. |
 | `QA_CORE_MAX_USD` | `2.00` | Hard ceiling per run. Cost is tracked per stage. Loop aborts if exceeded. **Do not raise without explicit discussion** — it's the runaway-loop safety rail. |
 | `QA_CORE_MAX_STEPS` | `40` | Hard ceiling on Explorer tool calls per run. |
-| `QA_CORE_MODEL_PLANNER` | `claude-haiku-4-5` | Override Planner model. |
-| `QA_CORE_MODEL_EXPLORE` | `claude-opus-4-7` | Override Explorer model. |
-| `QA_CORE_MODEL_CRITIC` | `claude-sonnet-4-6` | Override Critic model. |
+| `QA_CORE_PLANNER_MODEL` | `claude-haiku-4-5` | Override Planner model. Older `QA_CORE_MODEL_PLANNER` still works; this name wins when both are set. |
+| `QA_CORE_EXPLORER_MODEL` | `claude-opus-4-7` | Override Explorer model. Older `QA_CORE_MODEL_EXPLORE` still works; this name wins when both are set. |
+| `QA_CORE_CRITIC_MODEL` | `claude-sonnet-4-6` | Override Critic model. Older `QA_CORE_MODEL_CRITIC` still works; this name wins when both are set. |
 | `QA_CORE_MODEL_STABILIZER` | `claude-sonnet-4-6` | Override Stabilizer model (Stage 5b — LLM-guided flake recovery). |
 | `QA_CORE_MODEL_TRANSCRIBE` | `claude-sonnet-4-6` | Override `/generate` model. |
 | `QA_CORE_GATEWAY_PORT` | `18789` | WebSocket gateway port. UI defaults to the same. |

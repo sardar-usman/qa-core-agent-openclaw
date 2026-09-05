@@ -98,7 +98,8 @@ const SYSTEM = `You convert a software requirements document (SRS) into a struct
 Extraction rules:
 - Extract ONLY what the document states. Never invent URLs, features, roles, or rules that are not in the text.
 - Include a "urls" array on a feature ONLY when the document states the URL. Omit the key otherwise.
-- Every validation constraint gets its OWN rule: each length limit, format requirement, required field, and value range is one rule, not a combined sentence.
+- One stated requirement becomes ONE rule. Split a sentence into two rules ONLY when it genuinely contains two independently testable behaviors (a length limit AND a separate lockout policy). Do NOT split a requirement and its own error message into two rules: "the field is required, error X is shown" is one rule, because one test verifies both halves together.
+- Distinct constraints stated separately stay separate: each length limit, format requirement, required field, and value range that the document states on its own is its own rule, not a combined sentence.
 - Rule types: "validation" (input constraints), "behavior" (what the system does), "permission" (who may do what), "navigation" (where the user lands or may go).
 - Rule ids are R1, R2, R3, ... unique across the WHOLE document, in reading order.
 - Feature names are short lowercase kebab-case slugs (login, user-registration, cart).

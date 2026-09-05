@@ -32,6 +32,12 @@ export interface PlannedScenario {
    * rule ([-] in the plan). Absent entirely in the no-map format.
    */
   ruleIds?: string[];
+  /**
+   * The page this scenario runs on, set by multi-page discovery. The Explorer
+   * begins the scenario by navigating here. Absent on single-page runs, so
+   * the no-discovery plan shape is unchanged.
+   */
+  pageUrl?: string;
 }
 
 export interface PlanResult {
@@ -123,11 +129,20 @@ const RULE_PLANNING = `Rule-driven planning — these adjust the base constraint
 - Derive scenarios from the STATED rules first, DOM evidence second. A stated rule you can verify from this page always beats a scenario invented from the page alone.
 - Every scenario that verifies one or more rules MUST cite the rule ids in a THIRD bracket after the category, comma-separated. Example:
     1. [login][negative][R3,R7] rejected a 5-character password — fails if the length rule stops being enforced
+- Cite EVERY rule the scenario actually verifies, not only the rule that inspired it. An empty-username scenario that asserts the required-field error verifies BOTH the required rule AND the error-message rule; cite both ids. Before writing the bracket, walk the rule list and ask of each rule: "would this scenario go red if THIS rule broke?" — cite every rule where the answer is yes.
 - A scenario discovered from the page that matches NO stated rule uses [-] as the third bracket:
     2. [login][edge][-] password field masks input — fails if the field renders the password as plain text
 - Scenario ceiling with a map: up to 4 scenarios per feature listed in REQUIREMENTS (this replaces the 3-6 total constraint). Still at least one happy, one negative, and one edge scenario for every feature whose rules support them; do not force a category a feature's rules give no basis for.
 - Never invent rules, features, or URLs beyond the REQUIREMENTS block.
-- Falsifiability is unchanged: every scenario must still name the concrete regression it catches, and all the banned vacuous shapes remain banned.`;
+- Falsifiability is unchanged: every scenario must still name the concrete regression it catches, and all the banned vacuous shapes remain banned.
+
+Derivation checklist — walk this per feature when its rules or the page's form controls give a basis. Derive systematically, not by improvisation:
+1. Equivalence partitions: for each input a rule constrains, one scenario per meaningful class (one valid representative, one invalid representative). One representative per class, never exhaustive values.
+2. Boundary values: when a rule states a length or range, test at the stated edge (minimum length, maximum length, the value just outside). Boundaries beat mid-range invalids.
+3. Required-field omissions: one scenario per required field left empty, where the budget allows.
+4. Format violations: when a rule states a format (email, phone, URL), one scenario with a value that breaks the format.
+5. State transitions: when the rules name a state change (login to locked-out, cart to empty, session to expired), one scenario that drives the transition and asserts the resulting state.
+When the scenario budget forces choices, prefer: one representative per equivalence class over exhaustive values, boundary values over mid-range invalids, and rules typed validation over rules typed navigation. Every derived scenario still obeys the falsifiability doctrine and cites its rule ids.`;
 
 const PLANNER_PRICE = { in: 1.0, out: 5.0 }; // Haiku 4.5 default
 
@@ -489,7 +504,9 @@ export async function plan(opts: {
 }): Promise<PlanResult> {
   const apiKey = opts.apiKey ?? process.env.ANTHROPIC_API_KEY;
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY is not set.');
-  const model = opts.model ?? process.env.QA_CORE_MODEL_PLANNER ?? 'claude-haiku-4-5';
+  // Both env names are honored: QA_CORE_PLANNER_MODEL (documented) and the
+  // older QA_CORE_MODEL_PLANNER. Default unchanged.
+  const model = opts.model ?? process.env.QA_CORE_PLANNER_MODEL ?? process.env.QA_CORE_MODEL_PLANNER ?? 'claude-haiku-4-5';
   const client = new Anthropic({ apiKey });
 
   // Take one snapshot — title + visible interactive elements.

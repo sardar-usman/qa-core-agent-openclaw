@@ -75,7 +75,9 @@ export async function critique(opts: {
 
   const apiKey = opts.apiKey ?? process.env.ANTHROPIC_API_KEY;
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY is not set.');
-  const model = opts.model ?? process.env.QA_CORE_MODEL_CRITIC ?? 'claude-sonnet-4-6';
+  // Both env names are honored: QA_CORE_CRITIC_MODEL (documented) and the
+  // older QA_CORE_MODEL_CRITIC. Default unchanged.
+  const model = opts.model ?? process.env.QA_CORE_CRITIC_MODEL ?? process.env.QA_CORE_MODEL_CRITIC ?? 'claude-sonnet-4-6';
   const client = new Anthropic({ apiKey });
 
   const traceSummary = opts.scenarios.map((s, i) => {

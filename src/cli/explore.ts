@@ -58,6 +58,10 @@ interface ParsedArgs {
    * produces the rule-coverage report.
    */
   srs?: string;
+  /** Multi-page discovery (--discover). Also activated by --urls or --srs. */
+  discover: boolean;
+  /** Explicit page list from --urls (comma-separated). */
+  urls: string[];
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -72,6 +76,8 @@ function parseArgs(argv: string[]): ParsedArgs {
     stabilize: true,
     stabilizeAttempts: 3,
     features: [],
+    discover: false,
+    urls: [],
   };
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
@@ -111,6 +117,15 @@ function parseArgs(argv: string[]): ParsedArgs {
       }
       parsed.features = parseCommaSeparated(v);
     }
+    else if (a === '--discover') parsed.discover = true;
+    else if (a === '--urls') {
+      const v = args[++i];
+      if (!v) {
+        console.error('✗ --urls expects a comma-separated list of page URLs');
+        process.exit(1);
+      }
+      parsed.urls = v.split(',').map((s) => s.trim()).filter(Boolean);
+    }
     else if (a === '--srs') {
       const v = args[++i];
       if (!v) {
@@ -124,7 +139,8 @@ function parseArgs(argv: string[]): ParsedArgs {
   if (!parsed.url && !parsed.fromPlan) {
     console.error('Usage:');
     console.error('  npm run explore -- <url> [--lang ts|js] [--name foo] [--out dir] [--review]');
-    console.error('                          [--features login,cart] [--srs requirements.md] [--no-pom] [--no-replay]');
+    console.error('                          [--features login,cart] [--srs requirements.md] [--discover]');
+    console.error('                          [--urls /login,/cart] [--no-pom] [--no-replay]');
     console.error('                          [--no-stability] [--stability N] [--no-stabilize]');
     console.error('                          [--stabilize-attempts N]');
     console.error('  npm run explore -- --from-plan <plan.csv> [--lang ts|js] [--name foo] [--no-pom]');
@@ -168,6 +184,7 @@ function readPlanFile(planPath: string): ParsedPlanFile {
       name: r['Scenario'] ?? '',
       category: (r['Category'] as PlannedScenario['category']) ?? 'happy',
       rationale: r['Rationale'] ?? '',
+      ...(r['Page'] && r['Page'].trim() ? { pageUrl: r['Page'].trim() } : {}),
     }))
     .filter((s) => s.name.length > 0);
 
@@ -287,6 +304,8 @@ async function main(): Promise<void> {
     maxStabilizeAttempts: args.stabilizeAttempts,
     features: args.features,
     requirements,
+    discover: args.discover,
+    urls: args.urls,
     onEvent: (e) => {
       switch (e.type) {
         case 'plan_started':

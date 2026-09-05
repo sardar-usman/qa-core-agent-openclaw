@@ -266,6 +266,16 @@ export interface RunReport {
   paused?: false;
   url: string;
   language: 'ts' | 'js';
+  /**
+   * Multi-page discovery record: the rung that produced the page set, the
+   * final (filtered) pages, and every warning the ladder recorded. Absent on
+   * single-page runs.
+   */
+  discovery?: {
+    method: string;
+    pages: Array<{ url: string; source: 'srs' | 'sitemap' | 'crawl' | 'user' | 'entry'; feature?: string }>;
+    warnings: string[];
+  };
   scenarios: Scenario[];
   cascadeStats: Record<CascadeLevel, number>;
   cost: {
@@ -284,7 +294,7 @@ export interface RunReport {
   startedAt: string;
   finishedAt: string;
   /** Scenarios proposed by the Planner before the Explorer ran. */
-  plan?: Array<{ name: string; category: string; rationale: string; feature?: string; ruleIds?: string[] }>;
+  plan?: Array<{ name: string; category: string; rationale: string; feature?: string; ruleIds?: string[]; pageUrl?: string }>;
   /** Per-scenario verdicts from the Critic. */
   review?: {
     verdicts: Array<{
