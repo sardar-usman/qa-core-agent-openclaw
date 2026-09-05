@@ -519,6 +519,8 @@ npm run explore -- <url>
                    [--out <dir>]             base output directory (default: ./output)
                    [--review]                pause after Planner, write plan.csv
                    [--from-plan <csv>]       skip Planner, read approved scenarios from a previous review
+                   [--features a,b]          limit planning to these features
+                   [--srs <file>]            requirements document (.md/.txt/.pdf/.docx) for rule-driven planning
 ```
 
 **Examples:**
@@ -542,6 +544,7 @@ npm run generate -- "<story>"
                     [--lang ts|js]            output language (default: ts)
                     [--base-url <url>]        optional base URL baked into the spec
                     [--out <dir>]             base output directory
+                    [--srs <file>]            requirements document injected as rule context
 ```
 
 **Examples:**
@@ -552,6 +555,23 @@ npm run generate -- "..." --lang js --base-url https://staging.example.com
 ```
 
 The output spec carries an UNVERIFIED header until you run it.
+
+---
+
+### SRS-first workflow (`--srs`)
+
+Both `/explore` and `/generate` accept a requirements document, so the agent understands the stated functionality before planning tests.
+
+```bash
+npm run explore -- https://your-app.example.com --srs docs/requirements.md
+```
+
+1. **Load.** `.md` and `.txt` are read directly; `.pdf` via pdf-parse; `.docx` via mammoth. Text is capped at 60,000 characters (a longer document is cut and flagged `truncated: true`). Any other extension is rejected with an error naming the supported ones.
+2. **Map.** One Haiku call (`src/agent/requirements.ts`) converts the text into a `RequirementsMap`: features (kebab-case name, one-sentence description, URLs only when stated), per-feature rules with ids `R1..Rn` unique across the map and a type (`validation` / `behavior` / `permission` / `navigation`), and the roles the SRS names. Only what the document states is extracted; rules and URLs are never invented. The map is written to `requirements-map.json` in the run directory. An SRS that yields no features stops the run before the browser launches.
+3. **Plan from rules.** The Planner receives the map as a REQUIREMENTS system block and plans rule-first: scenarios derive from the stated rules, DOM evidence second, and every rule-verifying scenario cites its rule ids in a third bracket, e.g. `[login][negative][R3,R7] rejected a 5-character password`. A page-discovered scenario with no matching rule uses `[-]`. With a map present the ceiling is up to 4 scenarios per map feature. `--features` wins for feature selection when both flags are set; the rules still steer.
+4. **Report coverage.** Rule ids carry through the pipeline into the RunReport. The run ends with `rule-coverage.json` and a console summary (`Rule coverage: X of Y rules covered`); every uncovered rule is listed as `not-planned` or `planned-but-dropped` (a citing scenario existed but did not survive replay/stability). This is the considered-not-automated report.
+
+Without `--srs`, planner input and output are unchanged from the pre-SRS behaviour.
 
 ---
 
@@ -777,6 +797,8 @@ Each run writes to `output/<run-id>/`. The run ID format is `<YYYYMMDD>-<HHMMSS>
 |---|---|---|
 | `<name>.spec.ts` or `.js` | Playwright spec | The generated test suite |
 | `run-report.json` | JSON | Scenarios, cost per stage, cascade stats, Critic verdicts, timings |
+| `requirements-map.json` | JSON | The RequirementsMap built from the SRS (only with `--srs`) |
+| `rule-coverage.json` | JSON | Covered / uncovered rules with reasons (only with `--srs`) |
 
 ### From `/explore --review`
 

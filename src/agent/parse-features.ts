@@ -45,8 +45,9 @@ export interface ParseFeaturesResult {
  * Normalize a single feature label: trim, lowercase, replace internal
  * whitespace with hyphens. Strip surrounding quotes the user might paste.
  * Keep internal hyphens as-is so "user-profile" survives.
+ * Exported so requirements.ts normalizes SRS feature names the same way.
  */
-function normalize(name: string): string {
+export function normalizeFeatureName(name: string): string {
   return name
     .trim()
     .replace(/^["'`]+|["'`]+$/g, '')
@@ -60,7 +61,7 @@ function tidy(features: string[]): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
   for (const f of features) {
-    const n = normalize(f);
+    const n = normalizeFeatureName(f);
     if (!n) continue;
     if (seen.has(n)) continue;
     seen.add(n);
