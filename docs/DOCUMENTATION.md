@@ -594,7 +594,8 @@ Without any of the three flags, a run covers only the entry page, exactly as bef
 2. **User list** — the `--urls` value (comma-separated; absolute URLs or site-absolute paths). Sits above the remote rungs so an explicit list is never overridden by a sitemap.
 3. **Sitemap** — robots.txt is fetched first (its Disallow rules and Sitemap directive are noted), then the sitemap (one level of sitemap-index nesting). Same-origin pages only, capped at 30, keeping the shallowest paths when trimming.
 4. **Polite crawl** — only when robots.txt permits. Same-origin links from the entry page, depth 2, at most 15 pages, one fetch at a time with a 500ms pause, identified as `qa-core-agent-discovery`, plain HTTP (no browser). Asset links, fragments, and duplicate pathnames are skipped.
-5. **Entry only** — the entry URL, with warnings naming which rungs failed and why. Discovery never falls back silently.
+5. **Browser-assisted crawl** — only when the plain-fetch crawl found nothing. A client-rendered SPA serves a shell with no anchors to plain fetch, so this rung loads pages in a headless browser (the same Playwright + settle machinery the Planner snapshot uses) and reads the anchors off the rendered DOM. Identical robots rules, caps, delay, and dedupe; pages carry source `browser-crawl`. Static sites never pay the browser cost.
+6. **Entry only** — the entry URL, with warnings naming which rungs failed and why. Discovery never falls back silently.
 
 robots.txt is honored by BOTH the sitemap and crawl rungs; a robots file that disallows everything for our agent skips both, with the reason recorded.
 
@@ -790,7 +791,7 @@ The older spellings `QA_CORE_MODEL_PLANNER`, `QA_CORE_MODEL_EXPLORE`, and `QA_CO
 | Variable | Default | Purpose |
 |---|---|---|
 | `QA_CORE_MAX_STEPS` | `40` | Hard ceiling on Explorer tool calls |
-| `QA_CORE_MAX_USD` | `2.00` | Hard ceiling on Explorer cost per run |
+| `QA_CORE_COST_CEILING` | `2.00` | Cost ceiling per run in USD (older `QA_CORE_MAX_USD` still works; this name wins). Hitting it stops the Explorer cleanly: completed scenarios are kept and the pipeline (Critic, replay, stability, transcription, coverage) continues on them; the console and reconciliation report how many scenarios completed and how many planned ones were never explored. Multi-page runs cover more pages, so give them a higher ceiling (e.g. `5.00`). |
 
 ### Auth setup (optional)
 

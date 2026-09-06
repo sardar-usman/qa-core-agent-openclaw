@@ -10,7 +10,7 @@ import { critique, gateByVerdicts } from './critic.js';
 import { replay, type ReplayEvent } from './replay.js';
 import { stability, type StabilityEvent } from './stability.js';
 import { reconcile } from './reconcile.js';
-import { attachRuleIds, computeDerivation, computeRuleCoverage, renderRuleCoverage } from './rule-coverage.js';
+import { attachRuleIds, computeDerivation, computeRuleCoverage, renderRuleCoverage, scenarioNameKey } from './rule-coverage.js';
 import type { RequirementsMap } from './requirements.js';
 import { discoverPages } from './discovery.js';
 import { filterPages, MAX_PAGES_WITH_FEATURES } from './page-filter.js';
@@ -194,6 +194,63 @@ export const PER_PAGE_SCENARIO_CAP = 4;
 /** Global cap on planned scenarios per run; planning stops once reached. */
 export const GLOBAL_PLAN_CAP = 20;
 
+/** What the run keeps and loses when the cost ceiling stops the Explorer. */
+export interface CostCeilingSalvage {
+  /** The in-progress scenario that was discarded, when there was one. */
+  discardedInProgress?: string;
+  /** Planned scenarios the Explorer never started. */
+  unexplored: string[];
+  /** Reconciliation entries: the discarded scenario + every unexplored one. */
+  incomplete: Array<{ scenario: string; reason: string }>;
+  /** The console line: ceiling hit, N completed, M never explored. */
+  summary: string;
+}
+
+/**
+ * Salvage bookkeeping for a run stopped by the cost ceiling. Pure: the caller
+ * keeps every completed scenario, discards the in-progress one, and records
+ * each planned-but-never-started scenario as incomplete so the reconciliation
+ * funnel stays balanced and rule coverage can classify the unexplored rules.
+ * Name matching tolerates the Explorer's small rephrasings (same treatment
+ * attachRuleIds uses). Exported so smoke-cost-ceiling locks it offline.
+ */
+export function salvageOnCostCeiling(opts: {
+  planned: PlannedScenario[];
+  /** Names of every scenario that was started, whatever its outcome. */
+  begun: string[];
+  /** Count of completed (kept) scenarios, for the summary line. */
+  completed: number;
+  /** In-progress scenario name; discarded, never shipped half-built. */
+  current?: string;
+  costUsd: number;
+  ceilingUsd: number;
+}): CostCeilingSalvage {
+  const begunKeys = opts.begun.map(scenarioNameKey).filter((k) => k.length > 0);
+  const wasBegun = (plannedName: string): boolean => {
+    const k = scenarioNameKey(plannedName);
+    if (!k) return true;
+    return begunKeys.some((b) => b === k || b.includes(k) || k.includes(b));
+  };
+  const unexplored = opts.planned.filter((p) => !wasBegun(p.name)).map((p) => p.name);
+  const incomplete: CostCeilingSalvage['incomplete'] = [];
+  if (opts.current) {
+    incomplete.push({ scenario: opts.current, reason: 'cost ceiling hit mid-scenario; in-progress work discarded' });
+  }
+  for (const name of unexplored) {
+    incomplete.push({ scenario: name, reason: 'never explored: cost ceiling hit before this scenario started' });
+  }
+  const summary =
+    `Cost ceiling hit ($${opts.costUsd.toFixed(4)} > $${opts.ceilingUsd}). ` +
+    `${opts.completed} scenario(s) completed and kept, ${unexplored.length} planned scenario(s) never explored. ` +
+    `Continuing the pipeline with the survivors. Raise QA_CORE_COST_CEILING for broader runs.`;
+  return {
+    ...(opts.current ? { discardedInProgress: opts.current } : {}),
+    unexplored,
+    incomplete,
+    summary,
+  };
+}
+
 /** A requirements map narrowed to one feature, for per-page rule context. */
 function subMapFor(map: RequirementsMap | undefined, feature: string | undefined): RequirementsMap | undefined {
   if (!map || !feature) return map;
@@ -305,7 +362,11 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
   // retry (a full begin..end cycle, ~7 calls) is spent. See stepBudgetFor.
   const maxStepsOverride =
     opts.maxSteps ?? (process.env.QA_CORE_MAX_STEPS ? Number(process.env.QA_CORE_MAX_STEPS) : undefined);
-  const maxUsd = opts.maxUsd ?? Number(process.env.QA_CORE_MAX_USD ?? 2);
+  // Cost ceiling. QA_CORE_COST_CEILING is the documented name; the older
+  // QA_CORE_MAX_USD still works. Default unchanged ($2). Multi-page runs
+  // should set a higher ceiling; hitting it no longer aborts the run (the
+  // completed scenarios are salvaged, see salvageOnCostCeiling).
+  const maxUsd = opts.maxUsd ?? Number(process.env.QA_CORE_COST_CEILING ?? process.env.QA_CORE_MAX_USD ?? 2);
   // Both env names are honored: QA_CORE_EXPLORER_MODEL (documented) and the
   // older QA_CORE_MODEL_EXPLORE. Default unchanged.
   const model = opts.model ?? process.env.QA_CORE_EXPLORER_MODEL ?? process.env.QA_CORE_MODEL_EXPLORE ?? 'claude-opus-4-7';
@@ -544,6 +605,10 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
   // re-resolved a different, stable way). Carried into the report for human
   // visibility. The field keeps its `heals` name for the dashboard.
   let heals: Array<{ scenario?: string; intent: string; from: string; to: string }> = [];
+  // Set when the cost ceiling stopped the Explorer: what was kept, what was
+  // discarded, and which planned scenarios were never started. Flows into the
+  // reconciliation funnel (as incomplete entries) and rule coverage.
+  let ceilingSalvage: CostCeilingSalvage | undefined;
 
   try {
     browser = await chromium.launch({ headless: true });
@@ -589,7 +654,30 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
     //       it incomplete rather than dropping it silently. Without this, an
     //       abandoned empty scenario would pass Replay / Stability / Playwright
     //       vacuously and inflate failure rates.
-    if (ctx.current) {
+    //   (c) Cost ceiling — stop cleanly and salvage. Every completed scenario
+    //       is kept, ONLY the in-progress one is discarded, and each planned
+    //       scenario that never started is recorded as incomplete so nothing
+    //       vanishes from the funnel. The pipeline continues on the survivors.
+    if (explorerLoop.endedReason === 'cost_ceiling') {
+      const begun = [
+        ...ctx.scenarios.map((s) => s.name),
+        ...ctx.brokenByGate.map((b) => b.scenario),
+        ...ctx.incomplete.map((i) => i.scenario),
+        ...ctx.findings.map((f) => f.scenario),
+        ...(ctx.current ? [ctx.current.name] : []),
+      ];
+      ceilingSalvage = salvageOnCostCeiling({
+        planned: planResult.scenarios,
+        begun,
+        completed: ctx.scenarios.length,
+        ...(ctx.current ? { current: ctx.current.name } : {}),
+        costUsd: explorerLoop.cost.usd,
+        ceilingUsd: maxUsd,
+      });
+      ctx.incomplete.push(...ceilingSalvage.incomplete);
+      ctx.current = null;
+      opts.onEvent?.({ type: 'message', text: ceilingSalvage.summary });
+    } else if (ctx.current) {
       const budgetHit = explorerLoop.endedReason === 'budget' || ctx.steps >= maxSteps;
       if (budgetHit) {
         ctx.incomplete.push({ scenario: ctx.current.name, reason: 'step budget exhausted' });
@@ -916,6 +1004,9 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
         map: opts.requirements,
         planned: planResult.scenarios,
         scenarios: emittedScenarios,
+        // Rules cited only by scenarios the ceiling prevented from starting
+        // classify planned-not-explored, never planned-but-dropped.
+        unexplored: ceilingSalvage?.unexplored,
       }),
       // Derivation: which checklist categories produced scenarios per feature
       // and which were skipped, with the reason. The considered-not-automated
@@ -1007,7 +1098,9 @@ function collectResolvedIntents(scenarios: Scenario[]): Array<{ intent: string; 
   return out;
 }
 
-async function runAgentLoop(args: {
+// Exported so smoke-cost-ceiling can drive the loop with a fake client and
+// prove the ceiling breaks cleanly instead of throwing.
+export async function runAgentLoop(args: {
   client: Anthropic;
   model: string;
   maxUsd: number;
@@ -1017,7 +1110,7 @@ async function runAgentLoop(args: {
   url: string;
   plan: PlannedScenario[];
   onEvent?: ExploreOptions['onEvent'];
-}): Promise<{ cost: RunReport['cost']; endedReason: 'finished' | 'model_stop' | 'budget' }> {
+}): Promise<{ cost: RunReport['cost']; endedReason: 'finished' | 'model_stop' | 'budget' | 'cost_ceiling' }> {
   const { client, model, maxUsd, price, maxSteps, ctx, url, onEvent } = args;
 
   const cost = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, usd: 0 };
@@ -1069,7 +1162,7 @@ async function runAgentLoop(args: {
   // silently before the step budget could nudge the model to finish(). The
   // margin covers the final finish() turn plus any thinking-only turns.
   const maxTurns = maxSteps + 8;
-  let endedReason: 'finished' | 'model_stop' | 'budget' = 'budget';
+  let endedReason: 'finished' | 'model_stop' | 'budget' | 'cost_ceiling' = 'budget';
   // How many 'heal' events have already been surfaced. In-run selector
   // recoveries are recorded on ctx by resolveAndRecord (deep inside a tool
   // call); we drain new ones after each tool runs so each shows up as its own
@@ -1078,7 +1171,15 @@ async function runAgentLoop(args: {
 
   for (let turn = 0; turn < maxTurns; turn++) {
     if (cost.usd > maxUsd) {
-      throw new Error(`Cost ceiling exceeded ($${cost.usd.toFixed(3)} > $${maxUsd}). Aborting.`);
+      // Do NOT throw: aborting here used to lose every completed scenario.
+      // Stop the loop cleanly instead; the caller salvages the completed
+      // scenarios and runs the rest of the pipeline on them.
+      endedReason = 'cost_ceiling';
+      onEvent?.({
+        type: 'message',
+        text: `Cost ceiling reached ($${cost.usd.toFixed(3)} > $${maxUsd}); stopping the Explorer and salvaging completed scenarios.`,
+      });
+      break;
     }
 
     onEvent?.({ type: 'thinking_started' });

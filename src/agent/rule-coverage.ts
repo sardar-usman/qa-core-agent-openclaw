@@ -19,7 +19,7 @@ import type { RequirementsMap } from './requirements.js';
 
 export interface RuleCoverage {
   covered: Array<{ ruleId: string; scenarios: string[] }>;
-  uncovered: Array<{ ruleId: string; text: string; reason: 'not-planned' | 'planned-but-dropped' }>;
+  uncovered: Array<{ ruleId: string; text: string; reason: 'not-planned' | 'planned-but-dropped' | 'planned-not-explored' }>;
   /** Per-feature checklist derivation record. Present on SRS runs. */
   derivation?: FeatureDerivation[];
 }
@@ -69,6 +69,9 @@ export interface CitingScenario {
  * still keys to the planned name.
  */
 const ARTICLES = new Set(['the', 'a', 'an']);
+export function scenarioNameKey(name: string): string {
+  return nameKey(name);
+}
 function nameKey(name: string): string {
   return name
     .toLowerCase()
@@ -105,9 +108,16 @@ export function computeRuleCoverage(opts: {
   planned: CitingScenario[];
   /** Scenarios that survived to the final report. */
   scenarios: CitingScenario[];
+  /**
+   * Names of planned scenarios the Explorer never started (cost ceiling hit
+   * first). A rule cited ONLY by these classifies planned-not-explored, which
+   * is honest: nothing was attempted, so nothing was dropped.
+   */
+  unexplored?: string[];
 }): RuleCoverage {
   const covered: RuleCoverage['covered'] = [];
   const uncovered: RuleCoverage['uncovered'] = [];
+  const unexploredKeys = new Set((opts.unexplored ?? []).map(nameKey));
   for (const feature of opts.map.features) {
     for (const rule of feature.rules) {
       const surviving = opts.scenarios.filter((s) => (s.ruleIds ?? []).includes(rule.id));
@@ -115,12 +125,14 @@ export function computeRuleCoverage(opts: {
         covered.push({ ruleId: rule.id, scenarios: surviving.map((s) => s.name) });
         continue;
       }
-      const wasPlanned = opts.planned.some((p) => (p.ruleIds ?? []).includes(rule.id));
-      uncovered.push({
-        ruleId: rule.id,
-        text: rule.text,
-        reason: wasPlanned ? 'planned-but-dropped' : 'not-planned',
-      });
+      const citing = opts.planned.filter((p) => (p.ruleIds ?? []).includes(rule.id));
+      const reason: RuleCoverage['uncovered'][number]['reason'] =
+        citing.length === 0
+          ? 'not-planned'
+          : citing.every((p) => unexploredKeys.has(nameKey(p.name)))
+            ? 'planned-not-explored'
+            : 'planned-but-dropped';
+      uncovered.push({ ruleId: rule.id, text: rule.text, reason });
     }
   }
   return { covered, uncovered };

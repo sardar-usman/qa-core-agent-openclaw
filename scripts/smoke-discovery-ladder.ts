@@ -23,6 +23,7 @@ import {
   SITEMAP_PAGE_CAP,
   CRAWL_PAGE_CAP,
   type FetchLike,
+  type RenderedLinkCollector,
 } from '../src/agent/discovery.js';
 import type { RequirementsMap } from '../src/agent/requirements.js';
 
@@ -50,6 +51,16 @@ function fixtureFetch(routes: Record<string, string | number>): { fetchFn: Fetch
 
 const sitemapXml = (urls: string[]): string =>
   `<?xml version="1.0"?><urlset>${urls.map((u) => `<url><loc>${u}</loc></url>`).join('')}</urlset>`;
+
+/** Fake rendered-DOM collector: URL -> hrefs (or null = load failed). Counts calls. */
+function fakeCollector(routes: Record<string, string[] | null>): { collect: RenderedLinkCollector; calls: string[] } {
+  const calls: string[] = [];
+  const collect: RenderedLinkCollector = async (url) => {
+    calls.push(url);
+    return routes[url] !== undefined ? routes[url] : null;
+  };
+  return { collect, calls };
+}
 
 /* ─── A. robots.txt parsing ────────────────────────────────────────────────── */
 const robots = parseRobotsTxt(
@@ -184,12 +195,64 @@ const map: RequirementsMap = {
     roles: [],
     truncated: false,
   };
-  const r = await discoverPages({ entryUrl: `${ORIGIN}/landing`, requirements: emptyMap, fetchFn, crawlDelayMs: 0 });
+  // Browser rung's collector fails on every page too (SPA that will not load).
+  const { collect } = fakeCollector({});
+  const r = await discoverPages({ entryUrl: `${ORIGIN}/landing`, requirements: emptyMap, fetchFn, crawlDelayMs: 0, collectRendered: collect });
   check('H1. everything failing yields the entry page, source entry', r.method === 'entry' && r.pages.length === 1 && r.pages[0]?.url === `${ORIGIN}/landing`);
   check('H2. the SRS rung recorded why it yielded nothing', r.warnings.some((w) => w.includes('no feature states a URL')));
   check('H3. the sitemap rung recorded its failure', r.warnings.some((w) => w.includes('HTTP 500')));
-  check('H4. the crawl rung recorded why it yielded nothing', r.warnings.some((w) => w.includes('no additional same-origin pages')));
-  check('H5. the fallback itself is loud', r.warnings.some((w) => w.includes('fell back to the entry page')));
+  check('H4. the crawl rung recorded why it yielded nothing', r.warnings.some((w) => w.includes('no additional same-origin pages') && w.startsWith('crawl:')));
+  check('H5. the browser-crawl rung recorded its failure too', r.warnings.some((w) => w.startsWith('browser crawl:')), JSON.stringify(r.warnings));
+  check('H6. the fallback itself is loud', r.warnings.some((w) => w.includes('fell back to the entry page')));
+}
+
+/* ─── I. browser-crawl rung: fires only when the fetch crawl finds nothing ─── */
+{
+  // A client-rendered SPA: plain fetch returns a shell with no anchors, the
+  // rendered DOM has the real links (this is what happened live on
+  // practicesoftwaretesting.com).
+  const shell = `<div id="app"></div><script src="/main.js"></script>`;
+  const { fetchFn } = fixtureFetch({
+    [`${ORIGIN}/robots.txt`]: `User-agent: *\nDisallow: /admin\n`,
+    [`${ORIGIN}/sitemap.xml`]: 404,
+    [`${ORIGIN}/`]: shell,
+  });
+  const { collect, calls } = fakeCollector({
+    [`${ORIGIN}/`]: ['/login', '/cart', '/admin', '/logo.png', 'https://other.example/x', '/login#reset'],
+    [`${ORIGIN}/login`]: ['/login/help'],
+    [`${ORIGIN}/cart`]: [],
+    [`${ORIGIN}/login/help`]: ['/too/deep/now'],
+  });
+  const r = await discoverPages({ entryUrl: `${ORIGIN}/`, fetchFn, crawlDelayMs: 0, collectRendered: collect });
+  check('I1. browser-crawl rung fires when the fetch crawl finds no links', r.method === 'browser-crawl', r.method);
+  const paths = r.pages.map((p) => new URL(p.url).pathname).sort();
+  check('I2. rendered links collected with the same depth cap and filters', JSON.stringify(paths) === JSON.stringify(['/', '/cart', '/login', '/login/help']), JSON.stringify(paths));
+  check('I3. every page carries source browser-crawl', r.pages.every((p) => p.source === 'browser-crawl'));
+  check('I4. robots-disallowed link never visited by the browser', !calls.includes(`${ORIGIN}/admin`), JSON.stringify(calls));
+  check('I5. asset, cross-origin, and depth-3 links never visited', !calls.some((c) => c.endsWith('.png') || c.includes('other.example') || c.includes('/too/deep/now')));
+  check('I6. fragment link deduped by pathname (login visited once)', calls.filter((c) => new URL(c).pathname === '/login').length === 1);
+}
+
+/* ─── J. browser-crawl rung is SKIPPED when the fetch crawl succeeded ──────── */
+{
+  const { fetchFn } = fixtureFetch({
+    [`${ORIGIN}/robots.txt`]: 404,
+    [`${ORIGIN}/sitemap.xml`]: 404,
+    [`${ORIGIN}/`]: `<a href="/login">L</a>`,
+    [`${ORIGIN}/login`]: ``,
+  });
+  const { collect, calls } = fakeCollector({ [`${ORIGIN}/`]: ['/never-used'] });
+  const r = await discoverPages({ entryUrl: `${ORIGIN}/`, fetchFn, crawlDelayMs: 0, collectRendered: collect });
+  check('J1. fetch crawl succeeding keeps the cheap path', r.method === 'crawl', r.method);
+  check('J2. the browser collector is never invoked', calls.length === 0, JSON.stringify(calls));
+}
+
+/* ─── K. robots disallow-all also skips the browser-crawl rung ─────────────── */
+{
+  const { fetchFn } = fixtureFetch({ [`${ORIGIN}/robots.txt`]: `User-agent: *\nDisallow: /\n` });
+  const { collect, calls } = fakeCollector({ [`${ORIGIN}/`]: ['/x'] });
+  const r = await discoverPages({ entryUrl: `${ORIGIN}/`, fetchFn, crawlDelayMs: 0, collectRendered: collect });
+  check('K1. disallow-all yields entry-only with the browser rung untouched', r.method === 'entry' && calls.length === 0, `${r.method} calls=${calls.length}`);
 }
 
 console.log(`\n${pass}/${pass + fail} checks passed.`);

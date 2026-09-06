@@ -273,7 +273,7 @@ export interface RunReport {
    */
   discovery?: {
     method: string;
-    pages: Array<{ url: string; source: 'srs' | 'sitemap' | 'crawl' | 'user' | 'entry'; feature?: string }>;
+    pages: Array<{ url: string; source: 'srs' | 'sitemap' | 'crawl' | 'browser-crawl' | 'user' | 'entry'; feature?: string }>;
     warnings: string[];
   };
   scenarios: Scenario[];

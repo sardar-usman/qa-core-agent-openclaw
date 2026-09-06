@@ -10,6 +10,9 @@ import type { RequirementsMap } from './requirements.js';
  *   2. User list  — an explicit --urls flag value
  *   3. Sitemap    — robots.txt Sitemap directive, then sitemap.xml
  *   4. Polite crawl — same-origin links from the entry page, depth 2
+ *   4b. Browser crawl — same walk, links read off the RENDERED DOM. Only
+ *       when the fetch crawl found nothing (client-rendered SPAs serve a
+ *       shell with no anchors); static sites keep the cheap path
  *   5. Entry only — the entry URL, with a warning naming why 1-4 failed
  *
  * Note on rung order: the written spec listed the user list AFTER sitemap and
@@ -36,10 +39,17 @@ import type { RequirementsMap } from './requirements.js';
 
 export interface DiscoveredPage {
   url: string;
-  source: 'srs' | 'sitemap' | 'crawl' | 'user' | 'entry';
+  source: 'srs' | 'sitemap' | 'crawl' | 'browser-crawl' | 'user' | 'entry';
   /** Feature this page belongs to, when the source knows it (SRS rung). */
   feature?: string;
 }
+
+/**
+ * Collect anchor hrefs from a page's RENDERED DOM (a real browser), for the
+ * browser-crawl rung. Returns null when the page could not be loaded.
+ * Injectable so the smoke drives the rung with no browser.
+ */
+export type RenderedLinkCollector = (url: string) => Promise<string[] | null>;
 
 export interface DiscoveryResult {
   pages: DiscoveredPage[];
@@ -232,6 +242,11 @@ export interface DiscoverOptions {
   fetchFn?: FetchLike;
   /** Crawl pause override. Tests set 0; the default is CRAWL_DELAY_MS. */
   crawlDelayMs?: number;
+  /**
+   * Injectable rendered-DOM link collector for the browser-crawl rung.
+   * Defaults to a real Playwright browser, launched ONLY when the rung runs.
+   */
+  collectRendered?: RenderedLinkCollector;
 }
 
 /** Walk the discovery ladder. See the module doc for the rung order. */
@@ -314,10 +329,43 @@ export async function discoverPages(opts: DiscoverOptions): Promise<DiscoveryRes
       return { pages: sitemapPages, method: 'sitemap', warnings };
     }
 
-    // Rung 4 — polite crawl.
+    // Rung 4 — polite crawl (plain fetch).
     const crawlPages = await crawlRung(entry, robots, fetchFn, opts.crawlDelayMs ?? CRAWL_DELAY_MS, warnings);
     if (crawlPages.length > 0) {
       return { pages: crawlPages, method: 'crawl', warnings };
+    }
+
+    // Rung 4b — browser-assisted crawl. Only when the fetch crawl yielded
+    // nothing: a client-rendered SPA serves a shell with no anchors to plain
+    // fetch (practicesoftwaretesting.com found zero links on the live run),
+    // so the links must be read off the RENDERED DOM. Static sites never pay
+    // the browser cost. Same robots rules, caps, delay, and dedupe.
+    let collect = opts.collectRendered;
+    let closeCollector: (() => Promise<void>) | undefined;
+    if (!collect) {
+      const d = await defaultRenderedCollector(warnings);
+      if (d) {
+        collect = d.collect;
+        closeCollector = d.close;
+      }
+    }
+    if (collect) {
+      try {
+        const rendered = await walkCrawl({
+          entry,
+          robots,
+          getLinks: collect,
+          delayMs: opts.crawlDelayMs ?? CRAWL_DELAY_MS,
+          warnings,
+          label: 'browser crawl',
+          source: 'browser-crawl',
+        });
+        if (rendered.length > 0) {
+          return { pages: rendered, method: 'browser-crawl', warnings };
+        }
+      } finally {
+        await closeCollector?.();
+      }
     }
   }
 
@@ -417,49 +465,54 @@ async function sitemapRung(
 }
 
 /**
- * Rung 4: polite same-origin crawl from the entry page. Sequential, delayed,
- * UA-identified, depth- and count-capped, robots-respecting, fragment-free,
- * deduped by pathname. Yields nothing when the entry page has no same-origin
- * links (the entry alone is not "discovery").
+ * The shared polite crawl walker used by BOTH crawl rungs. Sequential,
+ * delayed, depth- and count-capped, robots-respecting, fragment-free, deduped
+ * by pathname. Only the link source differs: plain fetch + href regex for the
+ * fetch rung, a rendered-DOM collector for the browser rung. Yields nothing
+ * when the entry page has no same-origin links (the entry alone is not
+ * "discovery").
  */
-async function crawlRung(
-  entry: URL,
-  robots: RobotsInfo,
-  fetchFn: FetchLike,
-  delayMs: number,
-  warnings: string[],
-): Promise<DiscoveredPage[]> {
+async function walkCrawl(opts: {
+  entry: URL;
+  robots: RobotsInfo;
+  /** Links found on one page, or null when the page could not be loaded. */
+  getLinks: (url: string) => Promise<string[] | null>;
+  delayMs: number;
+  warnings: string[];
+  /** Warning prefix: 'crawl' or 'browser crawl'. */
+  label: string;
+  source: DiscoveredPage['source'];
+}): Promise<DiscoveredPage[]> {
+  const { entry, robots, getLinks, delayMs, warnings, label, source } = opts;
   if (!robotsAllows(robots, entry.pathname)) {
-    warnings.push(`crawl: robots.txt disallows the entry path ${entry.pathname}; crawl skipped.`);
+    warnings.push(`${label}: robots.txt disallows the entry path ${entry.pathname}; ${label} skipped.`);
     return [];
   }
   const visited = new Set<string>([entry.pathname]);
   const collected: URL[] = [];
   const queue: Array<{ u: URL; depth: number }> = [{ u: entry, depth: 0 }];
-  let fetches = 0;
+  let loads = 0;
   let failures = 0;
 
   while (queue.length > 0 && collected.length < CRAWL_PAGE_CAP) {
     const { u, depth } = queue.shift()!;
-    if (fetches > 0 && delayMs > 0) {
+    if (loads > 0 && delayMs > 0) {
       await new Promise((r) => setTimeout(r, delayMs));
     }
-    let html: string;
+    loads++;
+    let hrefs: string[] | null;
     try {
-      fetches++;
-      const res = await fetchFn(u.toString(), { headers: { 'user-agent': DISCOVERY_UA } });
-      if (!res.ok) {
-        failures++;
-        continue;
-      }
-      html = await res.text();
+      hrefs = await getLinks(u.toString());
     } catch {
+      hrefs = null;
+    }
+    if (hrefs === null) {
       failures++;
       continue;
     }
     collected.push(u);
     if (depth >= CRAWL_MAX_DEPTH) continue;
-    for (const href of extractHrefs(html)) {
+    for (const href of hrefs) {
       const link = toPageUrl(href, u);
       if (!link) continue;
       if (visited.has(link.pathname)) continue;
@@ -471,11 +524,81 @@ async function crawlRung(
   }
 
   if (failures > 0) {
-    warnings.push(`crawl: ${failures} fetch(es) failed or returned non-OK status.`);
+    warnings.push(`${label}: ${failures} page load(s) failed or returned non-OK status.`);
   }
   if (collected.length <= 1) {
-    warnings.push('crawl: found no additional same-origin pages beyond the entry; falling through.');
+    warnings.push(`${label}: found no additional same-origin pages beyond the entry; falling through.`);
     return [];
   }
-  return collected.slice(0, CRAWL_PAGE_CAP).map((u): DiscoveredPage => ({ url: u.toString(), source: 'crawl' }));
+  return collected.slice(0, CRAWL_PAGE_CAP).map((u): DiscoveredPage => ({ url: u.toString(), source }));
+}
+
+/** Rung 4: the plain-fetch crawl. Cheap; fails on client-rendered SPAs. */
+async function crawlRung(
+  entry: URL,
+  robots: RobotsInfo,
+  fetchFn: FetchLike,
+  delayMs: number,
+  warnings: string[],
+): Promise<DiscoveredPage[]> {
+  return walkCrawl({
+    entry,
+    robots,
+    getLinks: async (url) => {
+      try {
+        const res = await fetchFn(url, { headers: { 'user-agent': DISCOVERY_UA } });
+        if (!res.ok) return null;
+        return extractHrefs(await res.text());
+      } catch {
+        return null;
+      }
+    },
+    delayMs,
+    warnings,
+    label: 'crawl',
+    source: 'crawl',
+  });
+}
+
+/**
+ * Default rendered-DOM collector for the browser-crawl rung: one headless
+ * Playwright browser for the whole rung, the same settle logic the Planner
+ * snapshot uses, anchors read off the rendered DOM. Launched lazily so static
+ * sites (whose fetch crawl succeeds) never pay for a browser. Returns null
+ * with a warning when a browser cannot be launched.
+ */
+async function defaultRenderedCollector(
+  warnings: string[],
+): Promise<{ collect: RenderedLinkCollector; close: () => Promise<void> } | null> {
+  try {
+    const { chromium } = await import('playwright');
+    const { installEvalShim } = await import('./eval-shim.js');
+    const { settleForSnapshot } = await import('./planner.js');
+    const browser = await chromium.launch({ headless: true });
+    const ctx = await browser.newContext({ userAgent: DISCOVERY_UA });
+    await installEvalShim(ctx);
+    const page = await ctx.newPage();
+    const collect: RenderedLinkCollector = async (url) => {
+      try {
+        await page.goto(url, { waitUntil: 'load', timeout: 15_000 });
+        await settleForSnapshot(page);
+        return await page.evaluate(() =>
+          Array.from(document.querySelectorAll('a[href]'))
+            .map((a) => a.getAttribute('href') || '')
+            .filter((h) => h.length > 0),
+        );
+      } catch {
+        return null;
+      }
+    };
+    return {
+      collect,
+      close: async () => {
+        await browser.close().catch(() => {});
+      },
+    };
+  } catch (err) {
+    warnings.push(`browser crawl: could not launch a browser (${(err as Error).message}); rung skipped.`);
+    return null;
+  }
 }
