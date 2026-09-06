@@ -9,6 +9,7 @@ import type { Assertion, Scenario, SelectorRecord, TraceStep, CaptureSource, Com
 import { baseLocator } from './replay.js';
 import { detectUniqueField, generateUnique } from './unique-data.js';
 import { runGate } from './gate.js';
+import { scenarioNameKey } from './rule-coverage.js';
 import { adaptiveTimeout, ADAPTIVE_CEILING_MS } from './adaptive-timeout.js';
 import {
   chooseStateAssertion,
@@ -83,6 +84,15 @@ export interface ToolContext {
   page: Page;
   scenarios: Scenario[];
   current: Scenario | null;
+  /**
+   * Names of the planned scenarios, set by the runtime before the loop runs.
+   * finish() is rejected while any of these is neither explored nor skipped
+   * (unless the step budget is exhausted), so the Explorer cannot abandon the
+   * plan silently.
+   */
+  plannedNames: string[];
+  /** Planned scenarios explicitly skipped via skip_scenario, each with a reason. */
+  skipped: Array<{ scenario: string; reason: string }>;
   cascadeStats: Record<CascadeLevel, number>;
   steps: number;
   maxSteps: number;
@@ -181,6 +191,8 @@ export function createContext(page: Page, maxSteps: number): ToolContext {
     page,
     scenarios: [],
     current: null,
+    plannedNames: [],
+    skipped: [],
     cascadeStats: { role: 0, label: 0, placeholder: 0, text: 0, alt: 0, title: 0, testid: 0, css: 0, xpath: 0 },
     steps: 0,
     maxSteps,
@@ -531,9 +543,22 @@ export const TOOL_DEFS = [
     input_schema: { type: 'object', properties: {} },
   },
   {
+    name: 'skip_scenario',
+    description:
+      'Skip ONE planned scenario you cannot test, with a concrete reason (page unreachable, needs credentials you do not have, the control is not present). The skip is recorded in the report. Use this instead of finishing early: finish is only accepted when every planned scenario has been explored or explicitly skipped.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'The planned scenario name, verbatim from the plan' },
+        reason: { type: 'string', description: 'Why this scenario cannot be tested' },
+      },
+      required: ['name', 'reason'],
+    },
+  },
+  {
     name: 'finish',
     description:
-      'End the entire exploration. Call this once you have covered happy / negative / edge / a11y scenarios for the target.',
+      'End the entire exploration. Accepted only when every planned scenario has been explored or explicitly skipped via skip_scenario (or the step budget is exhausted).',
     input_schema: {
       type: 'object',
       properties: { summary: { type: 'string' } },
@@ -541,6 +566,29 @@ export const TOOL_DEFS = [
     },
   },
 ] as const;
+
+/**
+ * Planned scenarios that are neither explored (begun in any way: completed,
+ * gate-broken, incomplete, a finding, or currently in progress) nor skipped.
+ * Matching tolerates the Explorer's small rephrasings, same treatment as
+ * attachRuleIds.
+ */
+function unexploredPlanned(ctx: ToolContext): string[] {
+  const begun = [
+    ...ctx.scenarios.map((s) => s.name),
+    ...ctx.brokenByGate.map((b) => b.scenario),
+    ...ctx.incomplete.map((i) => i.scenario),
+    ...ctx.findings.map((f) => f.scenario),
+    ...ctx.skipped.map((s) => s.scenario),
+    ...(ctx.current ? [ctx.current.name] : []),
+  ];
+  const begunKeys = begun.map(scenarioNameKey).filter((k) => k.length > 0);
+  return ctx.plannedNames.filter((planned) => {
+    const k = scenarioNameKey(planned);
+    if (!k) return false;
+    return !begunKeys.some((b) => b === k || b.includes(k) || k.includes(b));
+  });
+}
 
 function pushStep(ctx: ToolContext, step: TraceStep): void {
   if (!ctx.current) throw new Error('No scenario in progress — call begin_scenario first.');
@@ -987,7 +1035,7 @@ export async function runTool(ctx: ToolContext, call: ToolInput): Promise<ToolRe
   // as a finding. Reject everything except starting the next scenario or
   // finishing, so the model cannot re-fill the form and thrash on the same wrong
   // success signal. Cheap rejection: no page action runs.
-  if (ctx._blockUntilNewScenario && call.name !== 'begin_scenario' && call.name !== 'finish') {
+  if (ctx._blockUntilNewScenario && call.name !== 'begin_scenario' && call.name !== 'finish' && call.name !== 'skip_scenario') {
     return {
       ok: false,
       error:
@@ -1453,7 +1501,47 @@ export async function runTool(ctx: ToolContext, call: ToolInput): Promise<ToolRe
           },
         };
       }
+      case 'skip_scenario': {
+        const rawName = String(call.input.name ?? '').trim();
+        const reason = String(call.input.reason ?? '').trim();
+        if (!rawName) return { ok: false, error: 'skip_scenario needs the planned scenario name.' };
+        if (!reason) return { ok: false, error: 'skip_scenario needs a concrete reason (why this scenario cannot be tested).' };
+        const key = scenarioNameKey(rawName);
+        const planned = ctx.plannedNames.find((p) => {
+          const pk = scenarioNameKey(p);
+          return pk === key || pk.includes(key) || key.includes(pk);
+        });
+        if (!planned) {
+          return {
+            ok: false,
+            error: `"${rawName}" matches no planned scenario. Planned: ${ctx.plannedNames.map((n) => `"${n}"`).join(', ')}.`,
+          };
+        }
+        if (ctx.skipped.some((s) => s.scenario === planned)) {
+          return { ok: false, error: `"${planned}" is already skipped.` };
+        }
+        ctx.skipped.push({ scenario: planned, reason });
+        return { ok: true, data: { skipped: planned, remaining: unexploredPlanned(ctx).length } };
+      }
       case 'finish': {
+        // Plan enforcement: the Explorer must not abandon the plan silently.
+        // finish is rejected while planned scenarios remain neither explored
+        // nor skipped, unless the step budget is exhausted (the cost ceiling
+        // breaks the loop before finish could be called). Same teaching
+        // pattern as the wait() rejection: name the gap, name the way out.
+        const unexplored = unexploredPlanned(ctx);
+        const budgetExhausted = ctx.steps >= ctx.maxSteps;
+        if (unexplored.length > 0 && !budgetExhausted) {
+          return {
+            ok: false,
+            error:
+              `finish rejected: ${unexplored.length} planned scenario(s) have not been explored: ` +
+              `${unexplored.map((n) => `"${n}"`).join(', ')}. ` +
+              `Continue with begin_scenario for the next one, or call skip_scenario (with a concrete reason) ` +
+              `for any scenario that cannot be tested. finish is accepted only when every planned scenario ` +
+              `is explored or explicitly skipped.`,
+          };
+        }
         // Lift any retry-cap block so finish always closes the run cleanly.
         ctx._blockUntilNewScenario = false;
         // A scenario in progress when finish() is called is an ABANDONED

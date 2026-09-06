@@ -29,6 +29,16 @@ check('A4. ruleIds parsed in order', JSON.stringify(a.ruleIds) === '["R3","R7"]'
 check('A5. name is clean (no bracket residue)', a.name === 'rejected a 5-character password', a.name);
 check('A6. rationale parsed', a.rationale.startsWith('fails if the length rule'));
 
+/* ─── A2. three or more rule ids in one citation ───────────────────────────── */
+// Phase 3 refinement: a scenario cites EVERY rule it verifies, so citations
+// with 3+ ids are the normal case (an empty-username scenario verifies the
+// required rule AND the error rule AND the general validation rule).
+const multi = parsePlan('<plan>\n1. [login][negative][R1,R2,R5] rejected an empty username with the inline error — fails if the required rule or the error message stops being enforced\n</plan>');
+check('A7. a three-id citation parses in order', JSON.stringify(multi[0]?.ruleIds) === '["R1","R2","R5"]', JSON.stringify(multi[0]?.ruleIds));
+check('A8. name stays clean after a multi-id bracket', multi[0]?.name === 'rejected an empty username with the inline error', multi[0]?.name);
+const five = parsePlan('1. [checkout][negative][R1,R2,R5,R9,R12] rejected the order — fails if any of the five checks stops firing');
+check('A9. five ids parse and normalize', JSON.stringify(five[0]?.ruleIds) === '["R1","R2","R5","R9","R12"]', JSON.stringify(five[0]?.ruleIds));
+
 /* ─── B. lowercase / spaced ids normalize ──────────────────────────────────── */
 const spaced = parsePlan('1. [cart][happy][r2, r10] added an item and the badge went up — fails if add-to-cart stops writing state');
 check('B1. lowercase + spaced ids normalize to R2,R10', JSON.stringify(spaced[0]?.ruleIds) === '["R2","R10"]', JSON.stringify(spaced[0]?.ruleIds));

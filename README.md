@@ -227,6 +227,21 @@ If you prefer a single-file output without the page object, pass `--no-pom`.
 
 Other useful flags: `--features login,cart` limits planning to those features, and `--srs requirements.md` feeds a requirements document into the run (see the SRS-first workflow below).
 
+### Multi-page discovery (cover the site, not just the entry page)
+
+```bash
+npm run explore -- https://your-app.example.com --discover
+npm run explore -- https://your-app.example.com --urls /login,/cart,/checkout
+```
+
+With `--discover`, `--urls`, or `--srs`, the agent decides which pages to cover by walking a ladder and stopping at the first source that yields pages: URLs stated in the SRS (tagged with their feature), then your explicit `--urls` list, then the site's sitemap (robots.txt is read first and its Sitemap directive used), then a polite crawl, and finally the entry page alone with a warning naming why the other sources failed.
+
+The remote sources are polite by design: robots.txt Disallow rules are always honored (a disallow-all robots skips the sitemap and both crawls entirely), the sitemap set is capped at 30 pages preferring shallow paths, and the crawl fetches one page at a time with a 500ms pause, identifies itself as `qa-core-agent-discovery`, stays same-origin, and stops at depth 2 or 15 pages. When the plain-fetch crawl finds nothing (client-rendered SPAs serve a shell with no links), a browser-assisted crawl reads the anchors off the rendered DOM under the same rules; static sites keep the cheap path. A large sitemap set is narrowed by a cheap Haiku call to the most relevant page per feature (max 8), with a deterministic shallowest-first fallback.
+
+Runs are protected by a cost ceiling (`QA_CORE_COST_CEILING`, default $2). Hitting it no longer loses your work: the agent stops exploring, keeps every completed scenario, finishes the pipeline on them, and reports how many planned scenarios were never explored. Multi-page runs cover more ground, so give them a higher ceiling.
+
+Each discovered page is then planned separately (up to 4 scenarios per page, 20 per run, planner cost itemized per page), and every scenario stays self-contained: it navigates to its own page first. Without all three flags, nothing changes: the run covers the entry page exactly as before.
+
 ### Review mode (sign-off before automation)
 
 For team workflows where a lead needs to approve scenarios before the Explorer runs:
@@ -265,6 +280,7 @@ npm run explore -- https://your-app.example.com --srs docs/requirements.md
 1. The SRS is loaded (`.md`, `.txt`, `.pdf`, or `.docx`; capped at 60,000 characters) and one cheap Haiku call converts it into a requirements map: features, per-feature rules with stable ids (R1, R2, ...), and the roles the document names. Only what the SRS states is extracted; URLs and rules are never invented.
 2. The map is written to `requirements-map.json` in the run directory and injected into the Planner, which now plans rule-first: scenarios are derived from the stated rules, and each scenario cites the rule ids it verifies in a third bracket, like `[login][negative][R3,R7] rejected a 5-character password`. A scenario discovered from the page with no matching rule is tagged `[-]`. With a map present the Planner may plan up to 4 scenarios per feature.
 3. The run ends with a rule-coverage report: `rule-coverage.json` plus a console summary (`Rule coverage: X of Y rules covered`). Every uncovered rule is listed with why (`not-planned`, or `planned-but-dropped` when the citing scenario did not survive replay and stability). That list is the "considered, not automated" report.
+4. Planning is systematic, not improvised: per feature the Planner walks a derivation checklist (equivalence partitions, boundary values, required-field omissions, format violations, state transitions the rules name), cites every rule a scenario verifies, and the coverage report records which checklist categories produced scenarios and which were skipped with a reason (`no-matching-control`, `budget`, `not-applicable`), one summary line per feature.
 
 The map shape:
 

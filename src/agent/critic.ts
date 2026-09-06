@@ -75,7 +75,9 @@ export async function critique(opts: {
 
   const apiKey = opts.apiKey ?? process.env.ANTHROPIC_API_KEY;
   if (!apiKey) throw new Error('ANTHROPIC_API_KEY is not set.');
-  const model = opts.model ?? process.env.QA_CORE_MODEL_CRITIC ?? 'claude-sonnet-4-6';
+  // Both env names are honored: QA_CORE_CRITIC_MODEL (documented) and the
+  // older QA_CORE_MODEL_CRITIC. Default unchanged.
+  const model = opts.model ?? process.env.QA_CORE_CRITIC_MODEL ?? process.env.QA_CORE_MODEL_CRITIC ?? 'claude-sonnet-4-6';
   const client = new Anthropic({ apiKey });
 
   const traceSummary = opts.scenarios.map((s, i) => {
@@ -106,7 +108,9 @@ export async function critique(opts: {
   return { verdicts: parseVerdicts(text), summary: parseSummary(text), costUsd };
 }
 
-function describeStep(step: TraceStep): string {
+// Exported: the repair pass renders each rework scenario's recorded steps
+// with this same compact notation so the Explorer starts from what it did.
+export function describeStep(step: TraceStep): string {
   switch (step.kind) {
     case 'navigate': return `navigate(${step.url})`;
     case 'click':    return `click(${step.target.intent} via ${step.target.level})`;
@@ -264,6 +268,74 @@ export function gateByVerdicts<S extends { name: string }>(
     kept: scenarios.filter((s) => !dropSet.has(s.name)),
     dropped: scenarios.filter((s) => dropSet.has(s.name)).map((s) => s.name),
   };
+}
+
+/**
+ * Split the gate three ways instead of two: reject drops for good, rework
+ * earns ONE repair pass, pass continues. A scenario with no verdict counts
+ * as pass (the Critic did not flag it).
+ */
+export function splitGate<S extends { name: string }>(
+  scenarios: S[],
+  verdicts: ScenarioVerdict[],
+): { kept: S[]; rejected: S[]; rework: S[] } {
+  const byName = new Map(verdicts.map((v) => [v.scenario, v.verdict]));
+  const kept: S[] = [];
+  const rejected: S[] = [];
+  const rework: S[] = [];
+  for (const s of scenarios) {
+    const v = byName.get(s.name);
+    if (v === 'reject') rejected.push(s);
+    else if (v === 'rework') rework.push(s);
+    else kept.push(s);
+  }
+  return { kept, rejected, rework };
+}
+
+/** One rework scenario's journey through the single repair pass. */
+export interface RepairHistoryEntry {
+  scenario: string;
+  first: 'rework';
+  /** The verdict after the repair pass. Absent when the repair never re-recorded it. */
+  second?: Verdict;
+  outcome: 'kept' | 'dropped';
+}
+
+/**
+ * Fold the second-round verdicts back into the first: non-rework verdicts
+ * pass through untouched; each rework is replaced by its second verdict when
+ * the repair pass produced one (pass keeps the repaired scenario, anything
+ * else drops for real), or stays rework (drops) when the repair never
+ * re-recorded it (no budget, scenario skipped, repair failed). This is the
+ * ONE repair pass: a second-time rework gets no third chance, structurally.
+ */
+export function mergeRepairVerdicts(
+  original: ScenarioVerdict[],
+  repaired: ScenarioVerdict[] | null,
+): { final: ScenarioVerdict[]; history: RepairHistoryEntry[] } {
+  const secondByName = new Map((repaired ?? []).map((v) => [v.scenario, v]));
+  const final: ScenarioVerdict[] = [];
+  const history: RepairHistoryEntry[] = [];
+  for (const v of original) {
+    if (v.verdict !== 'rework') {
+      final.push(v);
+      continue;
+    }
+    const second = secondByName.get(v.scenario);
+    if (!second) {
+      final.push(v);
+      history.push({ scenario: v.scenario, first: 'rework', outcome: 'dropped' });
+      continue;
+    }
+    final.push(second);
+    history.push({
+      scenario: v.scenario,
+      first: 'rework',
+      second: second.verdict,
+      outcome: second.verdict === 'pass' ? 'kept' : 'dropped',
+    });
+  }
+  return { final, history };
 }
 
 function parseSummary(text: string): string {

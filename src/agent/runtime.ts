@@ -6,12 +6,14 @@ import { createContext, runTool, TOOL_DEFS, type ToolContext } from './tools.js'
 import type { RunReport, Scenario } from './trace.js';
 import { renderMemoryBlock, saveRun, type RunSummary } from './memory.js';
 import { plan, type PlannedScenario } from './planner.js';
-import { critique, gateByVerdicts } from './critic.js';
+import { critique, describeStep, mergeRepairVerdicts, splitGate, type ScenarioVerdict } from './critic.js';
 import { replay, type ReplayEvent } from './replay.js';
 import { stability, type StabilityEvent } from './stability.js';
 import { reconcile } from './reconcile.js';
-import { attachRuleIds, computeRuleCoverage, renderRuleCoverage } from './rule-coverage.js';
+import { attachRuleIds, computeDerivation, computeRuleCoverage, renderRuleCoverage, scenarioNameKey } from './rule-coverage.js';
 import type { RequirementsMap } from './requirements.js';
+import { discoverPages } from './discovery.js';
+import { filterPages, FILTERED_SOURCES, MAX_PAGES_WITH_FEATURES } from './page-filter.js';
 import { installEvalShim } from './eval-shim.js';
 import type { CascadeLevel } from './selectors.js';
 import { writeCsv } from './csv.js';
@@ -35,7 +37,7 @@ You will be given a URL. Your job:
 2. Use get_dom to understand what's on the page.
 3. For each meaningful flow, call begin_scenario, then drive Playwright through the steps you would take to verify it, then call assert at least once, then end_scenario.
 4. Cover happy paths AND at least one negative case AND one accessibility-friendly check (e.g. that landmark elements have the right roles or that error states are announced).
-5. Call finish when you have 3-6 well-formed scenarios.
+5. Call finish only when EVERY planned scenario has been explored or explicitly skipped. A planned scenario you cannot test (page unreachable, missing credentials, control not present) must be skipped with skip_scenario and a concrete reason — never silently abandoned. finish is rejected while planned scenarios remain unexplored and unskipped.
 
 Rules:
 - Describe selectors by INTENT first (e.g. "username input", "submit button") and let the cascade resolve them. Provide hints (role, label, testid, css) when you can see them in the DOM.
@@ -176,7 +178,175 @@ export interface ExploreOptions {
    * (report.ruleCoverage + rule-coverage.json in the output directory).
    */
   requirements?: RequirementsMap;
+  /**
+   * Multi-page discovery (--discover). Discovery activates when this is set,
+   * OR when `urls` is non-empty, OR when `requirements` is present. Without
+   * all three, behavior is byte-identical to single-entry-page runs.
+   */
+  discover?: boolean;
+  /** Explicit page list from --urls. Feeds the discovery ladder's user rung. */
+  urls?: string[];
   onEvent?: (event: AgentEvent) => void;
+}
+
+/** Cap on scenarios planned per discovered page. */
+export const PER_PAGE_SCENARIO_CAP = 4;
+/** Global cap on planned scenarios per run; planning stops once reached. */
+export const GLOBAL_PLAN_CAP = 20;
+
+/** What the run keeps and loses when the cost ceiling stops the Explorer. */
+export interface CostCeilingSalvage {
+  /** The in-progress scenario that was discarded, when there was one. */
+  discardedInProgress?: string;
+  /** Planned scenarios the Explorer never started. */
+  unexplored: string[];
+  /** Reconciliation entries: the discarded scenario + every unexplored one. */
+  incomplete: Array<{ scenario: string; reason: string }>;
+  /** The console line: ceiling hit, N completed, M never explored. */
+  summary: string;
+}
+
+/**
+ * Salvage bookkeeping for a run stopped by the cost ceiling. Pure: the caller
+ * keeps every completed scenario, discards the in-progress one, and records
+ * each planned-but-never-started scenario as incomplete so the reconciliation
+ * funnel stays balanced and rule coverage can classify the unexplored rules.
+ * Name matching tolerates the Explorer's small rephrasings (same treatment
+ * attachRuleIds uses). Exported so smoke-cost-ceiling locks it offline.
+ */
+export function salvageOnCostCeiling(opts: {
+  planned: PlannedScenario[];
+  /** Names of every scenario that was started, whatever its outcome. */
+  begun: string[];
+  /** Count of completed (kept) scenarios, for the summary line. */
+  completed: number;
+  /** In-progress scenario name; discarded, never shipped half-built. */
+  current?: string;
+  costUsd: number;
+  ceilingUsd: number;
+}): CostCeilingSalvage {
+  const begunKeys = opts.begun.map(scenarioNameKey).filter((k) => k.length > 0);
+  const wasBegun = (plannedName: string): boolean => {
+    const k = scenarioNameKey(plannedName);
+    if (!k) return true;
+    return begunKeys.some((b) => b === k || b.includes(k) || k.includes(b));
+  };
+  const unexplored = opts.planned.filter((p) => !wasBegun(p.name)).map((p) => p.name);
+  const incomplete: CostCeilingSalvage['incomplete'] = [];
+  if (opts.current) {
+    incomplete.push({ scenario: opts.current, reason: 'cost ceiling hit mid-scenario; in-progress work discarded' });
+  }
+  for (const name of unexplored) {
+    incomplete.push({ scenario: name, reason: 'never explored: cost ceiling hit before this scenario started' });
+  }
+  const summary =
+    `Cost ceiling hit ($${opts.costUsd.toFixed(4)} > $${opts.ceilingUsd}). ` +
+    `${opts.completed} scenario(s) completed and kept, ${unexplored.length} planned scenario(s) never explored. ` +
+    `Continuing the pipeline with the survivors. Raise QA_CORE_COST_CEILING for broader runs.`;
+  return {
+    ...(opts.current ? { discardedInProgress: opts.current } : {}),
+    unexplored,
+    incomplete,
+    summary,
+  };
+}
+
+/**
+ * The single repair pass for rework verdicts. Launches a fresh browser (the
+ * exploration context is already closed by critic time), re-invokes the
+ * Explorer with ONLY the rework scenarios as the plan, each carrying the
+ * critic's reasons verbatim plus its recorded steps as the starting point,
+ * and returns the re-recorded traces. Respects the remaining cost budget:
+ * runAgentLoop's ceiling break applies, so completed repairs are salvaged.
+ */
+async function repairPass(args: {
+  client: Anthropic;
+  model: string;
+  price: (typeof PRICE)[ModelId];
+  remainingUsd: number;
+  url: string;
+  rework: Scenario[];
+  verdicts: ScenarioVerdict[];
+  onEvent?: ExploreOptions['onEvent'];
+}): Promise<{
+  scenarios: Scenario[];
+  cost: RunReport['cost'];
+  steps: number;
+  heals: Array<{ scenario?: string; intent: string; from: string; to: string }>;
+  /** Human-readable notes about repair-internal outcomes (findings, incompletes). */
+  notes: string[];
+}> {
+  const byName = new Map(args.verdicts.map((v) => [v.scenario, v]));
+  const plan: PlannedScenario[] = args.rework.map((s) => {
+    const v = byName.get(s.name);
+    return {
+      name: s.name,
+      category: s.category ?? 'happy',
+      rationale: `REWORK: ${(v?.reasons ?? []).join('; ') || 'assertion too weak'}`,
+      ...(s.feature ? { feature: s.feature } : {}),
+    };
+  });
+  const repairNote = [
+    'REPAIR PASS. The planned scenarios above were recorded earlier, but the Critic judged their assertions too weak. Re-record each one now:',
+    '- Reuse the recorded steps below as your starting point; do not change what the scenario tests.',
+    '- Strengthen exactly the named weaknesses: add the missing outcome assertion, replace the vacuous one.',
+    '',
+    ...args.rework.map((s) => {
+      const v = byName.get(s.name);
+      const fixes = v?.required_fixes?.length ? `\n  required fixes: ${v.required_fixes.join('; ')}` : '';
+      return `"${s.name}"\n  critic reasons: ${(v?.reasons ?? []).join('; ') || '(none given)'}${fixes}\n  recorded steps: ${s.steps.map(describeStep).join(' -> ')}`;
+    }),
+  ].join('\n');
+
+  let browser: Browser | undefined;
+  let context: BrowserContext | undefined;
+  try {
+    browser = await chromium.launch({ headless: true });
+    const storageStatePath = path.join(process.cwd(), 'playwright', '.auth', 'user.json');
+    context = await browser.newContext(
+      fs.existsSync(storageStatePath) ? { storageState: storageStatePath } : undefined,
+    );
+    await installEvalShim(context);
+    const page = await context.newPage();
+    const maxSteps = stepBudgetFor(args.rework.length, 0);
+    const ctx = createContext(page, maxSteps);
+    const loop = await runAgentLoop({
+      client: args.client,
+      model: args.model,
+      maxUsd: args.remainingUsd,
+      price: args.price,
+      maxSteps,
+      ctx,
+      url: args.url,
+      plan,
+      repairNote,
+      onEvent: args.onEvent,
+    });
+    const notes: string[] = [];
+    if (ctx.current) {
+      notes.push(
+        loop.endedReason === 'cost_ceiling'
+          ? `"${ctx.current.name}" was mid-repair when the cost ceiling hit; the in-progress work is discarded.`
+          : `"${ctx.current.name}" was left unfinished by the repair pass; discarded.`,
+      );
+      ctx.current = null;
+    }
+    for (const f of ctx.findings) notes.push(`finding during repair of "${f.scenario}": expected ${f.expected}, page stayed at ${f.url}.`);
+    for (const i of ctx.incomplete) notes.push(`"${i.scenario}" not re-recorded: ${i.reason}.`);
+    for (const b of ctx.brokenByGate) notes.push(`"${b.scenario}" rejected by the gate during repair: ${b.reason}.`);
+    for (const s of ctx.skipped) notes.push(`"${s.scenario}" skipped during repair: ${s.reason}.`);
+    return { scenarios: ctx.scenarios, cost: loop.cost, steps: ctx.steps, heals: ctx.heals, notes };
+  } finally {
+    await context?.close();
+    await browser?.close();
+  }
+}
+
+/** A requirements map narrowed to one feature, for per-page rule context. */
+function subMapFor(map: RequirementsMap | undefined, feature: string | undefined): RequirementsMap | undefined {
+  if (!map || !feature) return map;
+  const matched = map.features.filter((f) => f.name === feature);
+  return matched.length > 0 ? { ...map, features: matched } : map;
 }
 
 /**
@@ -283,8 +453,14 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
   // retry (a full begin..end cycle, ~7 calls) is spent. See stepBudgetFor.
   const maxStepsOverride =
     opts.maxSteps ?? (process.env.QA_CORE_MAX_STEPS ? Number(process.env.QA_CORE_MAX_STEPS) : undefined);
-  const maxUsd = opts.maxUsd ?? Number(process.env.QA_CORE_MAX_USD ?? 2);
-  const model = opts.model ?? process.env.QA_CORE_MODEL_EXPLORE ?? 'claude-opus-4-7';
+  // Cost ceiling. QA_CORE_COST_CEILING is the documented name; the older
+  // QA_CORE_MAX_USD still works. Default unchanged ($2). Multi-page runs
+  // should set a higher ceiling; hitting it no longer aborts the run (the
+  // completed scenarios are salvaged, see salvageOnCostCeiling).
+  const maxUsd = opts.maxUsd ?? Number(process.env.QA_CORE_COST_CEILING ?? process.env.QA_CORE_MAX_USD ?? 2);
+  // Both env names are honored: QA_CORE_EXPLORER_MODEL (documented) and the
+  // older QA_CORE_MODEL_EXPLORE. Default unchanged.
+  const model = opts.model ?? process.env.QA_CORE_EXPLORER_MODEL ?? process.env.QA_CORE_MODEL_EXPLORE ?? 'claude-opus-4-7';
   const price = priceFor(model);
 
   const client = new Anthropic({ apiKey });
@@ -305,7 +481,147 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
     fillableFields: 0,
   };
 
-  if (!opts.fromPlan && !opts.skipPlan) {
+  // Multi-page discovery activates ONLY when the caller asked for it via
+  // --discover, --urls, or --srs. With none of the three, the single plan()
+  // call below runs exactly as before, byte for byte.
+  const discoveryActive =
+    !opts.fromPlan && !opts.skipPlan &&
+    Boolean(opts.discover || (opts.urls && opts.urls.length > 0) || opts.requirements);
+  let discoveryInfo: RunReport['discovery'];
+  // True when planning stopped at a scenario cap (per-page or global). Turns
+  // derivation skips into 'budget' instead of 'no-matching-control'.
+  let planCapHit = false;
+
+  if (discoveryActive) {
+    opts.onEvent?.({ type: 'plan_started' });
+    const disc = await discoverPages({
+      entryUrl: opts.url,
+      requirements: opts.requirements,
+      userUrls: opts.urls,
+    });
+    for (const w of disc.warnings) {
+      opts.onEvent?.({ type: 'message', text: `discovery: ${w}` });
+    }
+
+    // Relevance filter — only the remote-discovered sets (sitemap/crawl) are
+    // trimmed. SRS pages are stated requirements and user pages are explicit
+    // intent; both pass through whole.
+    let pages = disc.pages;
+    let plannerUsd = 0;
+    if (FILTERED_SOURCES.has(disc.method)) {
+      const featureNames = opts.requirements
+        ? opts.requirements.features.map((f) => f.name)
+        : opts.features;
+      const filtered = await filterPages({ pages, features: featureNames, apiKey });
+      plannerUsd += filtered.costUsd;
+      if (filtered.method !== 'passthrough') {
+        opts.onEvent?.({
+          type: 'message',
+          text: `discovery: ${pages.length} page(s) narrowed to ${filtered.pages.length} (${filtered.method === 'llm' ? 'relevance pick' : 'deterministic fallback'})`,
+        });
+      }
+      pages = filtered.pages;
+    } else if (pages.length > MAX_PAGES_WITH_FEATURES) {
+      opts.onEvent?.({
+        type: 'message',
+        text: `discovery: ${pages.length} ${disc.method} page(s) kept in full; planning stops at the ${GLOBAL_PLAN_CAP}-scenario cap, so later pages may not be reached.`,
+      });
+    }
+    opts.onEvent?.({ type: 'message', text: `discovery: ${pages.length} page(s) via ${disc.method}` });
+    discoveryInfo = { method: disc.method, pages, warnings: disc.warnings };
+
+    // Per-page planning: up to PER_PAGE_SCENARIO_CAP scenarios per page,
+    // GLOBAL_PLAN_CAP total. Cost is itemized per page. A page whose plan
+    // fails is skipped with a message; the other pages still plan.
+    const combined: PlannedScenario[] = [];
+    const combinedDropped: Array<{ scenario: PlannedScenario; duplicateOf: PlannedScenario }> = [];
+    const combinedRejected: Array<{ scenario: PlannedScenario; reason: string }> = [];
+    let fillableMax = 0;
+    for (const [idx, pg] of pages.entries()) {
+      if (combined.length >= GLOBAL_PLAN_CAP) {
+        planCapHit = true;
+        opts.onEvent?.({
+          type: 'message',
+          text: `Planner: global cap of ${GLOBAL_PLAN_CAP} scenarios reached; ${pages.length - idx} page(s) not planned.`,
+        });
+        break;
+      }
+      let p: Awaited<ReturnType<typeof plan>>;
+      try {
+        p = await plan({
+          url: pg.url,
+          apiKey,
+          features: pg.feature ? [pg.feature] : opts.features,
+          requirements: subMapFor(opts.requirements, pg.feature),
+        });
+      } catch (err) {
+        opts.onEvent?.({
+          type: 'message',
+          text: `Planner failed on ${pg.url} (${(err as Error).message}); page skipped.`,
+        });
+        continue;
+      }
+      let scen = p.scenarios.map((s): PlannedScenario => ({
+        ...s,
+        pageUrl: pg.url,
+        ...(pg.feature && !s.feature ? { feature: pg.feature } : {}),
+      }));
+      if (scen.length > PER_PAGE_SCENARIO_CAP) {
+        planCapHit = true;
+        opts.onEvent?.({
+          type: 'message',
+          text: `Planner: ${pg.url} planned ${scen.length} scenarios, trimmed to the per-page cap of ${PER_PAGE_SCENARIO_CAP}.`,
+        });
+        scen = scen.slice(0, PER_PAGE_SCENARIO_CAP);
+      }
+      const room = GLOBAL_PLAN_CAP - combined.length;
+      if (scen.length > room) { planCapHit = true; scen = scen.slice(0, room); }
+      combined.push(...scen);
+      combinedDropped.push(...p.dropped);
+      combinedRejected.push(...p.rejected);
+      fillableMax = Math.max(fillableMax, p.fillableFields);
+      plannerUsd += p.costUsd;
+      opts.onEvent?.({
+        type: 'message',
+        text: `Planner [${idx + 1}/${pages.length}] ${pg.url}: ${scen.length} scenario(s) · $${p.costUsd.toFixed(4)}`,
+      });
+    }
+
+    if (combined.length === 0) {
+      throw new Error(
+        `Planner produced 0 scenarios across ${pages.length} discovered page(s) for ${opts.url}. ` +
+          `Stopping the run rather than letting the Explorer improvise without a plan.`,
+      );
+    }
+    planResult = { scenarios: combined, usd: plannerUsd, fillableFields: fillableMax };
+    opts.onEvent?.({ type: 'plan_done', scenarios: combined, usd: plannerUsd });
+    for (const d of combinedDropped) {
+      opts.onEvent?.({
+        type: 'message',
+        text: `Dropped near-duplicate scenario: "${d.scenario.name}" (same value + relation as "${d.duplicateOf.name}")`,
+      });
+    }
+    for (const r of combinedRejected) {
+      opts.onEvent?.({
+        type: 'message',
+        text: `Rejected circular scenario: "${r.scenario.name}" — ${r.reason}`,
+      });
+    }
+    if (opts.review) {
+      fs.mkdirSync(opts.outDir, { recursive: true });
+      const planPath = path.join(opts.outDir, 'plan.csv');
+      fs.writeFileSync(planPath, scenariosToCsv(opts.url, combined));
+      opts.onEvent?.({ type: 'review_paused', planPath, scenarios: combined });
+      return {
+        paused: true,
+        planPath,
+        scenarios: combined,
+        outDir: opts.outDir,
+        url: opts.url,
+        language: opts.language,
+      };
+    }
+  } else if (!opts.fromPlan && !opts.skipPlan) {
     opts.onEvent?.({ type: 'plan_started' });
     // A planner failure in the default path is fatal. We do NOT swallow it and
     // fall back to a blind Explorer run — improvising without a plan is exactly
@@ -380,6 +696,13 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
   // re-resolved a different, stable way). Carried into the report for human
   // visibility. The field keeps its `heals` name for the dashboard.
   let heals: Array<{ scenario?: string; intent: string; from: string; to: string }> = [];
+  // Planned scenarios the Explorer explicitly skipped via skip_scenario, each
+  // with its reason. A separate reconciliation term, never a silent gap.
+  let skipped: Array<{ scenario: string; reason: string }> = [];
+  // Set when the cost ceiling stopped the Explorer: what was kept, what was
+  // discarded, and which planned scenarios were never started. Flows into the
+  // reconciliation funnel (as incomplete entries) and rule coverage.
+  let ceilingSalvage: CostCeilingSalvage | undefined;
 
   try {
     browser = await chromium.launch({ headless: true });
@@ -425,7 +748,31 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
     //       it incomplete rather than dropping it silently. Without this, an
     //       abandoned empty scenario would pass Replay / Stability / Playwright
     //       vacuously and inflate failure rates.
-    if (ctx.current) {
+    //   (c) Cost ceiling — stop cleanly and salvage. Every completed scenario
+    //       is kept, ONLY the in-progress one is discarded, and each planned
+    //       scenario that never started is recorded as incomplete so nothing
+    //       vanishes from the funnel. The pipeline continues on the survivors.
+    if (explorerLoop.endedReason === 'cost_ceiling') {
+      const begun = [
+        ...ctx.scenarios.map((s) => s.name),
+        ...ctx.brokenByGate.map((b) => b.scenario),
+        ...ctx.incomplete.map((i) => i.scenario),
+        ...ctx.findings.map((f) => f.scenario),
+        ...ctx.skipped.map((s) => s.scenario),
+        ...(ctx.current ? [ctx.current.name] : []),
+      ];
+      ceilingSalvage = salvageOnCostCeiling({
+        planned: planResult.scenarios,
+        begun,
+        completed: ctx.scenarios.length,
+        ...(ctx.current ? { current: ctx.current.name } : {}),
+        costUsd: explorerLoop.cost.usd,
+        ceilingUsd: maxUsd,
+      });
+      ctx.incomplete.push(...ceilingSalvage.incomplete);
+      ctx.current = null;
+      opts.onEvent?.({ type: 'message', text: ceilingSalvage.summary });
+    } else if (ctx.current) {
       const budgetHit = explorerLoop.endedReason === 'budget' || ctx.steps >= maxSteps;
       if (budgetHit) {
         ctx.incomplete.push({ scenario: ctx.current.name, reason: 'step budget exhausted' });
@@ -468,6 +815,7 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
     incomplete = ctx.incomplete;
     findings = ctx.findings;
     heals = ctx.heals;
+    skipped = ctx.skipped;
   } finally {
     await context?.close();
     await browser?.close();
@@ -513,18 +861,86 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
     }
   }
 
-  // Gate on critic: 'rework' and 'reject' scenarios are dropped before replay.
-  // Only 'pass' scenarios proceed to Reality-Check (Step 4).
+  // Gate on critic. 'reject' drops for good. 'rework' earns ONE repair pass:
+  // the Explorer is re-invoked with only the rework scenarios, each carrying
+  // the critic's reasons verbatim and its recorded steps as the starting
+  // point; the critic re-reviews the repaired traces, and a second-time
+  // rework or reject drops for real (no loops, structurally one pass).
+  // 'pass' continues to Reality-Check (Step 4).
   let scenariosForReplay = scenarios;
   if (review && !opts.skipCritic) {
-    const gated = gateByVerdicts(scenarios, review.verdicts);
-    if (gated.dropped.length > 0) {
-      scenariosForReplay = gated.kept;
+    const split = splitGate(scenarios, review.verdicts);
+    if (split.rejected.length > 0) {
       opts.onEvent?.({
         type: 'message',
-        text: `Critic gated out ${gated.dropped.length} scenario(s) (rework/reject), not sent to Reality-Check: ${gated.dropped.map((n) => `"${n}"`).join(', ')}`,
+        text: `Critic rejected ${split.rejected.length} scenario(s), dropped: ${split.rejected.map((s) => `"${s.name}"`).join(', ')}`,
       });
     }
+    let kept = split.kept;
+    if (split.rework.length > 0) {
+      const spentSoFar = cost.usd + (cost.plannerUsd ?? 0) + (cost.criticUsd ?? 0);
+      const remainingUsd = maxUsd - spentSoFar;
+      let secondVerdicts: Awaited<ReturnType<typeof critique>>['verdicts'] | null = null;
+      if (remainingUsd <= 0.05) {
+        opts.onEvent?.({
+          type: 'message',
+          text: `No budget left for a repair pass ($${Math.max(0, remainingUsd).toFixed(4)} remaining); ${split.rework.length} rework scenario(s) dropped.`,
+        });
+      } else {
+        opts.onEvent?.({
+          type: 'message',
+          text: `Repair pass: re-exploring ${split.rework.length} rework scenario(s) with the critic's reasons ($${remainingUsd.toFixed(2)} of budget remaining).`,
+        });
+        try {
+          const repair = await repairPass({
+            client, model, price, remainingUsd,
+            url: opts.url,
+            rework: split.rework,
+            verdicts: review.verdicts,
+            onEvent: opts.onEvent,
+          });
+          cost.inputTokens += repair.cost.inputTokens;
+          cost.outputTokens += repair.cost.outputTokens;
+          cost.cacheReadTokens += repair.cost.cacheReadTokens;
+          cost.cacheCreationTokens += repair.cost.cacheCreationTokens;
+          cost.usd += repair.cost.usd;
+          steps += repair.steps;
+          // Heals carry over (no funnel impact). The repair attempt's own
+          // incomplete/finding entries are NOT merged: each rework scenario is
+          // already accounted for once, by its FINAL verdict, and adding them
+          // would double-count the funnel. They surface as messages instead.
+          heals.push(...repair.heals);
+          for (const note of repair.notes) {
+            opts.onEvent?.({ type: 'message', text: `repair: ${note}` });
+          }
+          if (repair.scenarios.length > 0) {
+            const c2 = await critique({ scenarios: repair.scenarios, url: opts.url, apiKey });
+            cost.criticUsd = (cost.criticUsd ?? 0) + c2.costUsd;
+            secondVerdicts = c2.verdicts;
+            opts.onEvent?.({ type: 'critic_done', verdicts: c2.verdicts, usd: c2.costUsd });
+          } else {
+            secondVerdicts = [];
+          }
+          const passNames = new Set((secondVerdicts ?? []).filter((v) => v.verdict === 'pass').map((v) => v.scenario));
+          kept = [...kept, ...repair.scenarios.filter((s) => passNames.has(s.name))];
+        } catch (err) {
+          opts.onEvent?.({
+            type: 'message',
+            text: `Repair pass failed (${(err as Error).message}); rework scenario(s) dropped.`,
+          });
+          secondVerdicts = null;
+        }
+      }
+      const merged = mergeRepairVerdicts(review.verdicts, secondVerdicts);
+      review = { verdicts: merged.final, summary: review.summary, repair: merged.history };
+      for (const h of merged.history) {
+        opts.onEvent?.({
+          type: 'message',
+          text: `Repair verdict: "${h.scenario}" rework -> ${h.second ?? 'not re-recorded'} (${h.outcome})`,
+        });
+      }
+    }
+    scenariosForReplay = kept;
   }
 
   // Step 4 — Reality check (replay). Re-execute every passing scenario in a fresh
@@ -721,6 +1137,7 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
   const report: RunReport = {
     url: opts.url,
     language: opts.language,
+    ...(discoveryInfo ? { discovery: discoveryInfo } : {}),
     scenarios: emittedScenarios,
     cascadeStats,
     cost,
@@ -735,6 +1152,7 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
     incomplete: incomplete.length > 0 ? incomplete : undefined,
     findings: findings.length > 0 ? findings : undefined,
     heals: heals.length > 0 ? heals : undefined,
+    skipped: skipped.length > 0 ? skipped : undefined,
   };
 
   // Reporting reconciliation — planned === generated + dropped, with every
@@ -746,11 +1164,24 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
   // or not-planned. Attached to the report and written to its own file so the
   // "considered, not automated" list survives alongside run-report.json.
   if (opts.requirements) {
-    report.ruleCoverage = computeRuleCoverage({
-      map: opts.requirements,
-      planned: planResult.scenarios,
-      scenarios: emittedScenarios,
-    });
+    report.ruleCoverage = {
+      ...computeRuleCoverage({
+        map: opts.requirements,
+        planned: planResult.scenarios,
+        scenarios: emittedScenarios,
+        // Rules cited only by scenarios the ceiling prevented from starting
+        // classify planned-not-explored, never planned-but-dropped.
+        unexplored: ceilingSalvage?.unexplored,
+      }),
+      // Derivation: which checklist categories produced scenarios per feature
+      // and which were skipped, with the reason. The considered-not-automated
+      // record alongside the rule list.
+      derivation: computeDerivation({
+        map: opts.requirements,
+        planned: planResult.scenarios,
+        budgetHit: planCapHit,
+      }),
+    };
     for (const line of renderRuleCoverage(report.ruleCoverage)) {
       opts.onEvent?.({ type: 'message', text: line });
     }
@@ -788,18 +1219,26 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
   return report;
 }
 
-/** Convert planned scenarios to a reviewable CSV. */
+/**
+ * Convert planned scenarios to a reviewable CSV. A Page column is added only
+ * when a scenario carries a pageUrl (multi-page discovery), so single-page
+ * review CSVs keep their exact pre-discovery shape.
+ */
 function scenariosToCsv(url: string, scenarios: PlannedScenario[]): string {
   const header = `# QA-Core review plan for ${url}\n# Set Approve=no on any row you do not want to test, then resume with:\n#   npm run explore -- --from-plan <this-file>\n\n`;
+  const multiPage = scenarios.some((s) => s.pageUrl);
   return header + writeCsv(
     scenarios.map((s, i) => ({
       '#': String(i + 1),
       Category: s.category,
       Scenario: s.name,
       Rationale: s.rationale,
+      ...(multiPage ? { Page: s.pageUrl ?? '' } : {}),
       Approve: 'yes',
     })),
-    ['#', 'Category', 'Scenario', 'Rationale', 'Approve'],
+    multiPage
+      ? ['#', 'Category', 'Scenario', 'Rationale', 'Page', 'Approve']
+      : ['#', 'Category', 'Scenario', 'Rationale', 'Approve'],
   );
 }
 
@@ -824,7 +1263,9 @@ function collectResolvedIntents(scenarios: Scenario[]): Array<{ intent: string; 
   return out;
 }
 
-async function runAgentLoop(args: {
+// Exported so smoke-cost-ceiling can drive the loop with a fake client and
+// prove the ceiling breaks cleanly instead of throwing.
+export async function runAgentLoop(args: {
   client: Anthropic;
   model: string;
   maxUsd: number;
@@ -833,9 +1274,19 @@ async function runAgentLoop(args: {
   ctx: ToolContext;
   url: string;
   plan: PlannedScenario[];
+  /**
+   * Repair-pass instructions appended as an extra system block: the critic's
+   * reasons per scenario plus the recorded steps to start from. Absent on
+   * normal exploration, so the standard prompt is untouched.
+   */
+  repairNote?: string;
   onEvent?: ExploreOptions['onEvent'];
-}): Promise<{ cost: RunReport['cost']; endedReason: 'finished' | 'model_stop' | 'budget' }> {
+}): Promise<{ cost: RunReport['cost']; endedReason: 'finished' | 'model_stop' | 'budget' | 'cost_ceiling' }> {
   const { client, model, maxUsd, price, maxSteps, ctx, url, onEvent } = args;
+
+  // Plan enforcement: finish() consults this list and is rejected while any
+  // planned scenario is neither explored nor skipped via skip_scenario.
+  ctx.plannedNames = args.plan.map((p) => p.name);
 
   const cost = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, usd: 0 };
 
@@ -847,13 +1298,21 @@ async function runAgentLoop(args: {
   // Render the plan including each scenario's feature tag (when present) so the
   // Explorer can pass it back via begin_scenario.feature. Feature names from
   // the plan are authoritative — the agent should use them verbatim.
+  // Multi-page runs: each scenario names the page it runs on; the Explorer
+  // must start such a scenario by navigating to that URL. Single-page plans
+  // carry no pageUrl, so this text stays byte-identical without discovery.
+  const multiPage = args.plan.some((p) => p.pageUrl);
   const planText = args.plan.length > 0
     ? 'Planned scenarios (cover all of these unless a scenario is impossible from this page). ' +
       'When you call begin_scenario, set `feature` to the value in the first bracket — verbatim, kebab-case.\n' +
+      (multiPage
+        ? 'Scenarios marked "page:" run on that page. Begin each such scenario by navigating to its page URL (scenarios stay self-contained).\n'
+        : '') +
       args.plan
         .map((p, i) => {
           const tag = p.feature ? `[${p.feature}][${p.category}]` : `[${p.category}]`;
-          return `  ${i + 1}. ${tag} ${p.name} — ${p.rationale}`;
+          const pageNote = p.pageUrl ? `\n     page: ${p.pageUrl}` : '';
+          return `  ${i + 1}. ${tag} ${p.name} — ${p.rationale}${pageNote}`;
         })
         .join('\n')
     : null;
@@ -867,6 +1326,9 @@ async function runAgentLoop(args: {
   if (planText) {
     systemBlocks.push({ type: 'text', text: planText } as Anthropic.TextBlockParam);
   }
+  if (args.repairNote) {
+    systemBlocks.push({ type: 'text', text: args.repairNote } as Anthropic.TextBlockParam);
+  }
 
   const messages: Anthropic.MessageParam[] = [
     { role: 'user', content: `Explore the following URL and produce a Playwright test plan: ${url}` },
@@ -878,7 +1340,7 @@ async function runAgentLoop(args: {
   // silently before the step budget could nudge the model to finish(). The
   // margin covers the final finish() turn plus any thinking-only turns.
   const maxTurns = maxSteps + 8;
-  let endedReason: 'finished' | 'model_stop' | 'budget' = 'budget';
+  let endedReason: 'finished' | 'model_stop' | 'budget' | 'cost_ceiling' = 'budget';
   // How many 'heal' events have already been surfaced. In-run selector
   // recoveries are recorded on ctx by resolveAndRecord (deep inside a tool
   // call); we drain new ones after each tool runs so each shows up as its own
@@ -887,7 +1349,15 @@ async function runAgentLoop(args: {
 
   for (let turn = 0; turn < maxTurns; turn++) {
     if (cost.usd > maxUsd) {
-      throw new Error(`Cost ceiling exceeded ($${cost.usd.toFixed(3)} > $${maxUsd}). Aborting.`);
+      // Do NOT throw: aborting here used to lose every completed scenario.
+      // Stop the loop cleanly instead; the caller salvages the completed
+      // scenarios and runs the rest of the pipeline on them.
+      endedReason = 'cost_ceiling';
+      onEvent?.({
+        type: 'message',
+        text: `Cost ceiling reached ($${cost.usd.toFixed(3)} > $${maxUsd}); stopping the Explorer and salvaging completed scenarios.`,
+      });
+      break;
     }
 
     onEvent?.({ type: 'thinking_started' });

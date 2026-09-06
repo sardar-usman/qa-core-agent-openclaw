@@ -64,7 +64,9 @@ export interface Reconciliation {
   incomplete: IncompleteScenario[];
   /** Scenarios whose expected outcome never occurred, each with the real page state. */
   findings: FindingScenario[];
-  /** generated + dropped.length + incomplete.length + findings.length. */
+  /** Planned scenarios the Explorer explicitly skipped via skip_scenario, with reasons. */
+  skipped: Array<{ name: string; reason: string }>;
+  /** generated + dropped.length + incomplete.length + findings.length + skipped.length. */
   accountedFor: number;
   /**
    * Scenarios the Explorer produced beyond the plan (accountedFor - planned,
@@ -175,7 +177,11 @@ export function reconcile(report: RunReport): Reconciliation {
     messages: f.messages,
   }));
 
-  const accountedFor = generated + dropped.length + incomplete.length + findings.length;
+  // 7. Skipped: the Explorer explicitly declined a planned scenario with a
+  // reason (skip_scenario). Its own term, never a silent shortfall.
+  const skipped = (report.skipped ?? []).map((s) => ({ name: s.scenario, reason: s.reason }));
+
+  const accountedFor = generated + dropped.length + incomplete.length + findings.length + skipped.length;
   const planned = report.plan?.length ?? accountedFor;
   const noPlan = report.plan == null;
   const added = Math.max(0, accountedFor - planned);
@@ -193,7 +199,68 @@ export function reconcile(report: RunReport): Reconciliation {
     note = `Explorer accounted for ${accountedFor} scenario(s) vs ${planned} planned (${shortfall} fewer). ${shortfall} planned scenario(s) vanished without a drop or incomplete reason.`;
   }
 
-  return { planned, generated, dropped, incomplete, findings, accountedFor, added, balanced, stable, recovered, flaky, broken, noPlan, note };
+  return { planned, generated, dropped, incomplete, findings, skipped, accountedFor, added, balanced, stable, recovered, flaky, broken, noPlan, note };
+}
+
+/** Which stage of the pipeline left a zero-scenario run empty. */
+export type EmptyRunCause = 'planner-none' | 'explorer-none' | 'critic-gated-all' | 'replay-dropped-all';
+
+/**
+ * Cause-specific diagnosis for a run that produced zero scenarios. The old
+ * behavior printed "the Planner couldn't reach the URL" for every empty run,
+ * which was wrong and expensive to believe (a $4.19 live run had 20 planned,
+ * 6 recorded, and all 6 gated by the critic). The report knows exactly where
+ * the funnel emptied; say that, with counts, and for a critic wipe-out the
+ * verdict summary. Returns null when the run is not empty.
+ */
+export function diagnoseEmptyRun(report: RunReport): { cause: EmptyRunCause; lines: string[] } | null {
+  if (report.scenarios.length > 0) return null;
+  const rec = report.reconciliation ?? reconcile(report);
+  const planned = report.plan?.length ?? 0;
+  const gateDrops = rec.dropped.filter((d) => d.stage === 'gate');
+  const criticDrops = rec.dropped.filter((d) => d.stage === 'critic');
+  const replayDrops = rec.dropped.filter((d) => d.stage === 'replay');
+  const stabilityDrops = rec.dropped.filter((d) => d.stage === 'stability');
+  // Scenarios that made it OUT of the Explorer (the critic saw them).
+  const recorded = criticDrops.length + replayDrops.length + stabilityDrops.length;
+
+  if (planned === 0) {
+    return {
+      cause: 'planner-none',
+      lines: ['The Planner planned 0 scenarios, so nothing was explored. The page may not have rendered its content, or it has nothing testable.'],
+    };
+  }
+  if (recorded === 0) {
+    const lines = [
+      `The Explorer recorded 0 of ${planned} planned scenario(s).`,
+    ];
+    if (gateDrops.length > 0) lines.push(`  ${gateDrops.length} broke at the gate: ${gateDrops.map((d) => `"${d.name}" (${d.reason})`).join('; ')}`);
+    if (rec.findings.length > 0) lines.push(`  ${rec.findings.length} became finding(s): the expected outcome never occurred (see the findings above).`);
+    if (rec.incomplete.length > 0) lines.push(`  ${rec.incomplete.length} left incomplete: ${rec.incomplete.map((i) => `"${i.name}" (${i.reason})`).join('; ')}`);
+    if (rec.skipped.length > 0) lines.push(`  ${rec.skipped.length} skipped by the Explorer: ${rec.skipped.map((s) => `"${s.name}" (${s.reason})`).join('; ')}`);
+    lines.push('The page was reached; the failure happened during exploration, not planning.');
+    return { cause: 'explorer-none', lines };
+  }
+  if (criticDrops.length === recorded) {
+    const lines = [
+      `The Explorer recorded ${recorded} scenario(s); the Critic gated ALL of them (nothing reached Reality-Check).`,
+      'Verdicts:',
+    ];
+    for (const v of report.review?.verdicts ?? []) {
+      if (v.verdict === 'pass') continue;
+      lines.push(`  • "${v.scenario}": ${v.verdict}${v.reasons.length ? ` — ${v.reasons.join('; ')}` : ''}`);
+    }
+    return { cause: 'critic-gated-all', lines };
+  }
+  const survivedCritic = recorded - criticDrops.length;
+  const lines = [
+    `The Explorer recorded ${recorded} scenario(s), ${survivedCritic} passed the Critic, and replay/stability dropped every survivor ` +
+      `(${replayDrops.length} at replay, ${stabilityDrops.length} at stability).`,
+  ];
+  for (const d of [...replayDrops, ...stabilityDrops]) {
+    lines.push(`  • "${d.name}" — ${d.reason}`);
+  }
+  return { cause: 'replay-dropped-all', lines };
 }
 
 /**
@@ -207,11 +274,12 @@ export function renderReconciliation(rec: Reconciliation): string[] {
   // runs keep the familiar "generated + dropped" line.
   const incompleteTerm = rec.incomplete.length > 0 ? ` + incomplete ${rec.incomplete.length}` : '';
   const findingsTerm = rec.findings.length > 0 ? ` + findings ${rec.findings.length}` : '';
+  const skippedTerm = rec.skipped.length > 0 ? ` + skipped ${rec.skipped.length}` : '';
   // When the Explorer added scenarios beyond the plan, annotate the planned term
   // so the surplus is visible and the [OK] mark is not surprising.
   const plannedTerm = rec.added > 0 ? `planned ${rec.planned} (+${rec.added} added)` : `planned ${rec.planned}`;
   lines.push(
-    `Reconciliation: ${plannedTerm} = generated ${rec.generated} + dropped ${rec.dropped.length}${incompleteTerm}${findingsTerm} [${balanceMark}]`,
+    `Reconciliation: ${plannedTerm} = generated ${rec.generated} + dropped ${rec.dropped.length}${incompleteTerm}${findingsTerm}${skippedTerm} [${balanceMark}]`,
   );
   lines.push(
     `  stable ${rec.stable} · recovered ${rec.recovered} · flaky ${rec.flaky} · broken ${rec.broken}` +
@@ -234,6 +302,12 @@ export function renderReconciliation(rec: Reconciliation): string[] {
     for (const f of rec.findings) {
       const msg = f.messages.length > 0 ? ` Page said: ${f.messages.join(' | ')}.` : ' No visible message.';
       lines.push(`    • "${f.name}" — expected ${f.expected}, page stayed at ${f.url}.${msg}`);
+    }
+  }
+  if (rec.skipped.length > 0) {
+    lines.push('  skipped (declined by the Explorer, with reason):');
+    for (const s of rec.skipped) {
+      lines.push(`    • "${s.name}" — ${s.reason}`);
     }
   }
   if (rec.note) lines.push(`  note: ${rec.note}`);

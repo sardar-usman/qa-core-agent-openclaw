@@ -266,6 +266,16 @@ export interface RunReport {
   paused?: false;
   url: string;
   language: 'ts' | 'js';
+  /**
+   * Multi-page discovery record: the rung that produced the page set, the
+   * final (filtered) pages, and every warning the ladder recorded. Absent on
+   * single-page runs.
+   */
+  discovery?: {
+    method: string;
+    pages: Array<{ url: string; source: 'srs' | 'sitemap' | 'crawl' | 'browser-crawl' | 'user' | 'entry'; feature?: string }>;
+    warnings: string[];
+  };
   scenarios: Scenario[];
   cascadeStats: Record<CascadeLevel, number>;
   cost: {
@@ -284,7 +294,7 @@ export interface RunReport {
   startedAt: string;
   finishedAt: string;
   /** Scenarios proposed by the Planner before the Explorer ran. */
-  plan?: Array<{ name: string; category: string; rationale: string; feature?: string; ruleIds?: string[] }>;
+  plan?: Array<{ name: string; category: string; rationale: string; feature?: string; ruleIds?: string[]; pageUrl?: string }>;
   /** Per-scenario verdicts from the Critic. */
   review?: {
     verdicts: Array<{
@@ -294,6 +304,12 @@ export interface RunReport {
       required_fixes: string[];
     }>;
     summary: string;
+    /**
+     * Verdict history for scenarios that went through the single repair pass:
+     * rework -> pass (kept) or rework -> rework/reject/not-re-recorded
+     * (dropped). The verdicts array above holds the FINAL verdicts.
+     */
+    repair?: Array<{ scenario: string; first: 'rework'; second?: 'pass' | 'rework' | 'reject'; outcome: 'kept' | 'dropped' }>;
   };
   /**
    * Reality check: each scenario was re-executed in a fresh Playwright context
@@ -414,6 +430,12 @@ export interface RunReport {
    * stable count. Computed in the runtime after the pipeline finishes. See
    * reconcile.ts.
    */
+  /**
+   * Planned scenarios the Explorer explicitly skipped via skip_scenario, each
+   * with a reason. Part of the reconciliation identity:
+   * planned === generated + dropped + incomplete + findings + skipped.
+   */
+  skipped?: Array<{ scenario: string; reason: string }>;
   reconciliation?: import('./reconcile.js').Reconciliation;
   /**
    * Rule coverage against the requirements map (SRS runs only). Also written

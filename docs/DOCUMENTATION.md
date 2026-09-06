@@ -526,6 +526,8 @@ npm run explore -- <url>
                    [--from-plan <csv>]       skip Planner, read approved scenarios from a previous review
                    [--features a,b]          limit planning to these features
                    [--srs <file>]            requirements document (.md/.txt/.pdf/.docx) for rule-driven planning
+                   [--discover]              multi-page discovery (sitemap, then polite crawl)
+                   [--urls /login,/cart]     explicit page list (absolute URLs or site-absolute paths)
 ```
 
 **Examples:**
@@ -577,6 +579,29 @@ npm run explore -- https://your-app.example.com --srs docs/requirements.md
 4. **Report coverage.** Rule ids carry through the pipeline into the RunReport. The run ends with `rule-coverage.json` and a console summary (`Rule coverage: X of Y rules covered`); every uncovered rule is listed as `not-planned` or `planned-but-dropped` (a citing scenario existed but did not survive replay/stability). This is the considered-not-automated report.
 
 Without `--srs`, planner input and output are unchanged from the pre-SRS behaviour.
+
+On an SRS run the Planner also walks a derivation checklist per feature (equivalence partitions, boundary values, required-field omissions, format violations, state transitions the rules name) and cites EVERY rule a scenario verifies, not only the one that inspired it: an empty-username scenario that asserts the required-field error cites both the required rule and the error rule. When the budget forces choices it prefers one representative per equivalence class over exhaustive values, boundaries over mid-range invalids, and validation rules over navigation rules.
+
+`rule-coverage.json` gains a matching `derivation` section: per feature, which checklist categories produced scenarios and which were skipped, each skip with a reason (`no-matching-control`, `budget`, or `not-applicable`). The console prints one line per feature: scenarios planned, rules cited, and the skipped categories. This is the considered-not-automated deliverable.
+
+---
+
+### Multi-page discovery (`--discover`, `--urls`, or `--srs`)
+
+Without any of the three flags, a run covers only the entry page, exactly as before. With any of them, discovery decides the page set by walking a ladder (`src/agent/discovery.ts`), stopping at the first rung that yields pages:
+
+1. **SRS map** — features in the requirements map that state URLs. Each page is tagged with its feature.
+2. **User list** — the `--urls` value (comma-separated; absolute URLs or site-absolute paths). Sits above the remote rungs so an explicit list is never overridden by a sitemap.
+3. **Sitemap** — robots.txt is fetched first (its Disallow rules and Sitemap directive are noted), then the sitemap (one level of sitemap-index nesting). Same-origin pages only, capped at 30, keeping the shallowest paths when trimming.
+4. **Polite crawl** — only when robots.txt permits. Same-origin links from the entry page, depth 2, at most 15 pages, one fetch at a time with a 500ms pause, identified as `qa-core-agent-discovery`, plain HTTP (no browser). Asset links, fragments, and duplicate pathnames are skipped.
+5. **Browser-assisted crawl** — only when the plain-fetch crawl found nothing. A client-rendered SPA serves a shell with no anchors to plain fetch, so this rung loads pages in a headless browser (the same Playwright + settle machinery the Planner snapshot uses) and reads the anchors off the rendered DOM. Identical robots rules, caps, delay, and dedupe; pages carry source `browser-crawl`. Static sites never pay the browser cost.
+6. **Entry only** — the entry URL, with warnings naming which rungs failed and why. Discovery never falls back silently.
+
+robots.txt is honored by BOTH the sitemap and crawl rungs; a robots file that disallows everything for our agent skips both, with the reason recorded.
+
+**Relevance filter.** A sitemap or crawl set is narrowed by one Haiku call (`src/agent/page-filter.ts`): the most relevant page per feature (max 8 total), or up to 5 distinct-feature-looking pages when no feature list exists. If the call fails, the deterministic fallback keeps the shallowest unique-pathname pages. SRS and `--urls` page sets are never trimmed.
+
+**Multi-page planning budgets.** Each discovered page is snapshotted and planned separately, with its feature context and that feature's rules from the map: up to 4 scenarios per page, 20 planned scenarios per run (planning stops at the cap). Planner cost is itemized per page in the run log. Every scenario carries its page URL and stays self-contained (it navigates to its page first).
 
 ---
 
@@ -754,17 +779,19 @@ All configuration is via environment variables. See [`.env.example`](../.env.exa
 
 | Variable | Default |
 |---|---|
-| `QA_CORE_MODEL_PLANNER` | `claude-haiku-4-5` |
-| `QA_CORE_MODEL_EXPLORE` | `claude-opus-4-7` |
-| `QA_CORE_MODEL_CRITIC` | `claude-sonnet-4-6` |
+| `QA_CORE_PLANNER_MODEL` | `claude-haiku-4-5` |
+| `QA_CORE_EXPLORER_MODEL` | `claude-opus-4-7` |
+| `QA_CORE_CRITIC_MODEL` | `claude-sonnet-4-6` |
 | `QA_CORE_MODEL_TRANSCRIBE` | `claude-sonnet-4-6` *(used by `/generate`)* |
+
+The older spellings `QA_CORE_MODEL_PLANNER`, `QA_CORE_MODEL_EXPLORE`, and `QA_CORE_MODEL_CRITIC` still work; the names above win when both are set.
 
 ### Budgets
 
 | Variable | Default | Purpose |
 |---|---|---|
 | `QA_CORE_MAX_STEPS` | `40` | Hard ceiling on Explorer tool calls |
-| `QA_CORE_MAX_USD` | `2.00` | Hard ceiling on Explorer cost per run |
+| `QA_CORE_COST_CEILING` | `2.00` | Cost ceiling per run in USD (older `QA_CORE_MAX_USD` still works; this name wins). Hitting it stops the Explorer cleanly: completed scenarios are kept and the pipeline (Critic, replay, stability, transcription, coverage) continues on them; the console and reconciliation report how many scenarios completed and how many planned ones were never explored. Multi-page runs cover more pages, so give them a higher ceiling (e.g. `5.00`). |
 
 ### Auth setup (optional)
 
