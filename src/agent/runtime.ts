@@ -6,14 +6,14 @@ import { createContext, runTool, TOOL_DEFS, type ToolContext } from './tools.js'
 import type { RunReport, Scenario } from './trace.js';
 import { renderMemoryBlock, saveRun, type RunSummary } from './memory.js';
 import { plan, type PlannedScenario } from './planner.js';
-import { critique, gateByVerdicts } from './critic.js';
+import { critique, describeStep, mergeRepairVerdicts, splitGate, type ScenarioVerdict } from './critic.js';
 import { replay, type ReplayEvent } from './replay.js';
 import { stability, type StabilityEvent } from './stability.js';
 import { reconcile } from './reconcile.js';
 import { attachRuleIds, computeDerivation, computeRuleCoverage, renderRuleCoverage, scenarioNameKey } from './rule-coverage.js';
 import type { RequirementsMap } from './requirements.js';
 import { discoverPages } from './discovery.js';
-import { filterPages, MAX_PAGES_WITH_FEATURES } from './page-filter.js';
+import { filterPages, FILTERED_SOURCES, MAX_PAGES_WITH_FEATURES } from './page-filter.js';
 import { installEvalShim } from './eval-shim.js';
 import type { CascadeLevel } from './selectors.js';
 import { writeCsv } from './csv.js';
@@ -37,7 +37,7 @@ You will be given a URL. Your job:
 2. Use get_dom to understand what's on the page.
 3. For each meaningful flow, call begin_scenario, then drive Playwright through the steps you would take to verify it, then call assert at least once, then end_scenario.
 4. Cover happy paths AND at least one negative case AND one accessibility-friendly check (e.g. that landmark elements have the right roles or that error states are announced).
-5. Call finish when you have 3-6 well-formed scenarios.
+5. Call finish only when EVERY planned scenario has been explored or explicitly skipped. A planned scenario you cannot test (page unreachable, missing credentials, control not present) must be skipped with skip_scenario and a concrete reason — never silently abandoned. finish is rejected while planned scenarios remain unexplored and unskipped.
 
 Rules:
 - Describe selectors by INTENT first (e.g. "username input", "submit button") and let the cascade resolve them. Provide hints (role, label, testid, css) when you can see them in the DOM.
@@ -251,6 +251,97 @@ export function salvageOnCostCeiling(opts: {
   };
 }
 
+/**
+ * The single repair pass for rework verdicts. Launches a fresh browser (the
+ * exploration context is already closed by critic time), re-invokes the
+ * Explorer with ONLY the rework scenarios as the plan, each carrying the
+ * critic's reasons verbatim plus its recorded steps as the starting point,
+ * and returns the re-recorded traces. Respects the remaining cost budget:
+ * runAgentLoop's ceiling break applies, so completed repairs are salvaged.
+ */
+async function repairPass(args: {
+  client: Anthropic;
+  model: string;
+  price: (typeof PRICE)[ModelId];
+  remainingUsd: number;
+  url: string;
+  rework: Scenario[];
+  verdicts: ScenarioVerdict[];
+  onEvent?: ExploreOptions['onEvent'];
+}): Promise<{
+  scenarios: Scenario[];
+  cost: RunReport['cost'];
+  steps: number;
+  heals: Array<{ scenario?: string; intent: string; from: string; to: string }>;
+  /** Human-readable notes about repair-internal outcomes (findings, incompletes). */
+  notes: string[];
+}> {
+  const byName = new Map(args.verdicts.map((v) => [v.scenario, v]));
+  const plan: PlannedScenario[] = args.rework.map((s) => {
+    const v = byName.get(s.name);
+    return {
+      name: s.name,
+      category: s.category ?? 'happy',
+      rationale: `REWORK: ${(v?.reasons ?? []).join('; ') || 'assertion too weak'}`,
+      ...(s.feature ? { feature: s.feature } : {}),
+    };
+  });
+  const repairNote = [
+    'REPAIR PASS. The planned scenarios above were recorded earlier, but the Critic judged their assertions too weak. Re-record each one now:',
+    '- Reuse the recorded steps below as your starting point; do not change what the scenario tests.',
+    '- Strengthen exactly the named weaknesses: add the missing outcome assertion, replace the vacuous one.',
+    '',
+    ...args.rework.map((s) => {
+      const v = byName.get(s.name);
+      const fixes = v?.required_fixes?.length ? `\n  required fixes: ${v.required_fixes.join('; ')}` : '';
+      return `"${s.name}"\n  critic reasons: ${(v?.reasons ?? []).join('; ') || '(none given)'}${fixes}\n  recorded steps: ${s.steps.map(describeStep).join(' -> ')}`;
+    }),
+  ].join('\n');
+
+  let browser: Browser | undefined;
+  let context: BrowserContext | undefined;
+  try {
+    browser = await chromium.launch({ headless: true });
+    const storageStatePath = path.join(process.cwd(), 'playwright', '.auth', 'user.json');
+    context = await browser.newContext(
+      fs.existsSync(storageStatePath) ? { storageState: storageStatePath } : undefined,
+    );
+    await installEvalShim(context);
+    const page = await context.newPage();
+    const maxSteps = stepBudgetFor(args.rework.length, 0);
+    const ctx = createContext(page, maxSteps);
+    const loop = await runAgentLoop({
+      client: args.client,
+      model: args.model,
+      maxUsd: args.remainingUsd,
+      price: args.price,
+      maxSteps,
+      ctx,
+      url: args.url,
+      plan,
+      repairNote,
+      onEvent: args.onEvent,
+    });
+    const notes: string[] = [];
+    if (ctx.current) {
+      notes.push(
+        loop.endedReason === 'cost_ceiling'
+          ? `"${ctx.current.name}" was mid-repair when the cost ceiling hit; the in-progress work is discarded.`
+          : `"${ctx.current.name}" was left unfinished by the repair pass; discarded.`,
+      );
+      ctx.current = null;
+    }
+    for (const f of ctx.findings) notes.push(`finding during repair of "${f.scenario}": expected ${f.expected}, page stayed at ${f.url}.`);
+    for (const i of ctx.incomplete) notes.push(`"${i.scenario}" not re-recorded: ${i.reason}.`);
+    for (const b of ctx.brokenByGate) notes.push(`"${b.scenario}" rejected by the gate during repair: ${b.reason}.`);
+    for (const s of ctx.skipped) notes.push(`"${s.scenario}" skipped during repair: ${s.reason}.`);
+    return { scenarios: ctx.scenarios, cost: loop.cost, steps: ctx.steps, heals: ctx.heals, notes };
+  } finally {
+    await context?.close();
+    await browser?.close();
+  }
+}
+
 /** A requirements map narrowed to one feature, for per-page rule context. */
 function subMapFor(map: RequirementsMap | undefined, feature: string | undefined): RequirementsMap | undefined {
   if (!map || !feature) return map;
@@ -417,7 +508,7 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
     // intent; both pass through whole.
     let pages = disc.pages;
     let plannerUsd = 0;
-    if (disc.method === 'sitemap' || disc.method === 'crawl') {
+    if (FILTERED_SOURCES.has(disc.method)) {
       const featureNames = opts.requirements
         ? opts.requirements.features.map((f) => f.name)
         : opts.features;
@@ -605,6 +696,9 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
   // re-resolved a different, stable way). Carried into the report for human
   // visibility. The field keeps its `heals` name for the dashboard.
   let heals: Array<{ scenario?: string; intent: string; from: string; to: string }> = [];
+  // Planned scenarios the Explorer explicitly skipped via skip_scenario, each
+  // with its reason. A separate reconciliation term, never a silent gap.
+  let skipped: Array<{ scenario: string; reason: string }> = [];
   // Set when the cost ceiling stopped the Explorer: what was kept, what was
   // discarded, and which planned scenarios were never started. Flows into the
   // reconciliation funnel (as incomplete entries) and rule coverage.
@@ -664,6 +758,7 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
         ...ctx.brokenByGate.map((b) => b.scenario),
         ...ctx.incomplete.map((i) => i.scenario),
         ...ctx.findings.map((f) => f.scenario),
+        ...ctx.skipped.map((s) => s.scenario),
         ...(ctx.current ? [ctx.current.name] : []),
       ];
       ceilingSalvage = salvageOnCostCeiling({
@@ -720,6 +815,7 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
     incomplete = ctx.incomplete;
     findings = ctx.findings;
     heals = ctx.heals;
+    skipped = ctx.skipped;
   } finally {
     await context?.close();
     await browser?.close();
@@ -765,18 +861,86 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
     }
   }
 
-  // Gate on critic: 'rework' and 'reject' scenarios are dropped before replay.
-  // Only 'pass' scenarios proceed to Reality-Check (Step 4).
+  // Gate on critic. 'reject' drops for good. 'rework' earns ONE repair pass:
+  // the Explorer is re-invoked with only the rework scenarios, each carrying
+  // the critic's reasons verbatim and its recorded steps as the starting
+  // point; the critic re-reviews the repaired traces, and a second-time
+  // rework or reject drops for real (no loops, structurally one pass).
+  // 'pass' continues to Reality-Check (Step 4).
   let scenariosForReplay = scenarios;
   if (review && !opts.skipCritic) {
-    const gated = gateByVerdicts(scenarios, review.verdicts);
-    if (gated.dropped.length > 0) {
-      scenariosForReplay = gated.kept;
+    const split = splitGate(scenarios, review.verdicts);
+    if (split.rejected.length > 0) {
       opts.onEvent?.({
         type: 'message',
-        text: `Critic gated out ${gated.dropped.length} scenario(s) (rework/reject), not sent to Reality-Check: ${gated.dropped.map((n) => `"${n}"`).join(', ')}`,
+        text: `Critic rejected ${split.rejected.length} scenario(s), dropped: ${split.rejected.map((s) => `"${s.name}"`).join(', ')}`,
       });
     }
+    let kept = split.kept;
+    if (split.rework.length > 0) {
+      const spentSoFar = cost.usd + (cost.plannerUsd ?? 0) + (cost.criticUsd ?? 0);
+      const remainingUsd = maxUsd - spentSoFar;
+      let secondVerdicts: Awaited<ReturnType<typeof critique>>['verdicts'] | null = null;
+      if (remainingUsd <= 0.05) {
+        opts.onEvent?.({
+          type: 'message',
+          text: `No budget left for a repair pass ($${Math.max(0, remainingUsd).toFixed(4)} remaining); ${split.rework.length} rework scenario(s) dropped.`,
+        });
+      } else {
+        opts.onEvent?.({
+          type: 'message',
+          text: `Repair pass: re-exploring ${split.rework.length} rework scenario(s) with the critic's reasons ($${remainingUsd.toFixed(2)} of budget remaining).`,
+        });
+        try {
+          const repair = await repairPass({
+            client, model, price, remainingUsd,
+            url: opts.url,
+            rework: split.rework,
+            verdicts: review.verdicts,
+            onEvent: opts.onEvent,
+          });
+          cost.inputTokens += repair.cost.inputTokens;
+          cost.outputTokens += repair.cost.outputTokens;
+          cost.cacheReadTokens += repair.cost.cacheReadTokens;
+          cost.cacheCreationTokens += repair.cost.cacheCreationTokens;
+          cost.usd += repair.cost.usd;
+          steps += repair.steps;
+          // Heals carry over (no funnel impact). The repair attempt's own
+          // incomplete/finding entries are NOT merged: each rework scenario is
+          // already accounted for once, by its FINAL verdict, and adding them
+          // would double-count the funnel. They surface as messages instead.
+          heals.push(...repair.heals);
+          for (const note of repair.notes) {
+            opts.onEvent?.({ type: 'message', text: `repair: ${note}` });
+          }
+          if (repair.scenarios.length > 0) {
+            const c2 = await critique({ scenarios: repair.scenarios, url: opts.url, apiKey });
+            cost.criticUsd = (cost.criticUsd ?? 0) + c2.costUsd;
+            secondVerdicts = c2.verdicts;
+            opts.onEvent?.({ type: 'critic_done', verdicts: c2.verdicts, usd: c2.costUsd });
+          } else {
+            secondVerdicts = [];
+          }
+          const passNames = new Set((secondVerdicts ?? []).filter((v) => v.verdict === 'pass').map((v) => v.scenario));
+          kept = [...kept, ...repair.scenarios.filter((s) => passNames.has(s.name))];
+        } catch (err) {
+          opts.onEvent?.({
+            type: 'message',
+            text: `Repair pass failed (${(err as Error).message}); rework scenario(s) dropped.`,
+          });
+          secondVerdicts = null;
+        }
+      }
+      const merged = mergeRepairVerdicts(review.verdicts, secondVerdicts);
+      review = { verdicts: merged.final, summary: review.summary, repair: merged.history };
+      for (const h of merged.history) {
+        opts.onEvent?.({
+          type: 'message',
+          text: `Repair verdict: "${h.scenario}" rework -> ${h.second ?? 'not re-recorded'} (${h.outcome})`,
+        });
+      }
+    }
+    scenariosForReplay = kept;
   }
 
   // Step 4 — Reality check (replay). Re-execute every passing scenario in a fresh
@@ -988,6 +1152,7 @@ export async function explore(opts: ExploreOptions): Promise<RunReport | ReviewP
     incomplete: incomplete.length > 0 ? incomplete : undefined,
     findings: findings.length > 0 ? findings : undefined,
     heals: heals.length > 0 ? heals : undefined,
+    skipped: skipped.length > 0 ? skipped : undefined,
   };
 
   // Reporting reconciliation — planned === generated + dropped, with every
@@ -1109,9 +1274,19 @@ export async function runAgentLoop(args: {
   ctx: ToolContext;
   url: string;
   plan: PlannedScenario[];
+  /**
+   * Repair-pass instructions appended as an extra system block: the critic's
+   * reasons per scenario plus the recorded steps to start from. Absent on
+   * normal exploration, so the standard prompt is untouched.
+   */
+  repairNote?: string;
   onEvent?: ExploreOptions['onEvent'];
 }): Promise<{ cost: RunReport['cost']; endedReason: 'finished' | 'model_stop' | 'budget' | 'cost_ceiling' }> {
   const { client, model, maxUsd, price, maxSteps, ctx, url, onEvent } = args;
+
+  // Plan enforcement: finish() consults this list and is rejected while any
+  // planned scenario is neither explored nor skipped via skip_scenario.
+  ctx.plannedNames = args.plan.map((p) => p.name);
 
   const cost = { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, usd: 0 };
 
@@ -1150,6 +1325,9 @@ export async function runAgentLoop(args: {
   }
   if (planText) {
     systemBlocks.push({ type: 'text', text: planText } as Anthropic.TextBlockParam);
+  }
+  if (args.repairNote) {
+    systemBlocks.push({ type: 'text', text: args.repairNote } as Anthropic.TextBlockParam);
   }
 
   const messages: Anthropic.MessageParam[] = [

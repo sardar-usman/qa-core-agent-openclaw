@@ -524,13 +524,26 @@ async function tryRoleNameVariants(
 }
 
 /**
- * Strip over-escaped quotes from CSS attribute selectors. Models occasionally
- * emit `[data-test=\"foo\"]` when they should emit `[data-test="foo"]`. Only
- * normalises ASCII single + double quotes; everything else is left alone.
+ * Strip over-escaped and typographic quotes from CSS attribute selectors.
+ * Models occasionally emit `[data-test=\"foo\"]` when they should emit
+ * `[data-test="foo"]`, and a doubly-escaped `\\"` needs a SECOND pass or a
+ * stray backslash survives and Playwright's selector parser rejects the whole
+ * selector — silently, because the resolver counts a parse error as 0 matches.
+ * That is how `a[data-testid^=\\"product-\\"]` failed to resolve on the live
+ * run while plain testid hints worked. Unescape to a fixpoint (bounded), and
+ * map smart quotes (another model artifact that breaks the parse) to ASCII.
  */
 export function normalizeCssQuotes(css: string): string {
-  if (!css || (css.indexOf('\\"') < 0 && css.indexOf("\\'") < 0)) return css;
-  return css.replace(/\\"/g, '"').replace(/\\'/g, "'");
+  if (!css) return css;
+  let out = css
+    .replace(/[“”„‟]/g, '"')
+    .replace(/[‘’‚‛]/g, "'");
+  for (let i = 0; i < 4; i++) {
+    const next = out.replace(/\\"/g, '"').replace(/\\'/g, "'");
+    if (next === out) break;
+    out = next;
+  }
+  return out;
 }
 
 /**

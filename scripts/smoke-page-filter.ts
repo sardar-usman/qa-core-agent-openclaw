@@ -15,6 +15,7 @@ import {
   filterPages,
   pageCapFor,
   parsePickResponse,
+  FILTERED_SOURCES,
   MAX_PAGES_WITH_FEATURES,
   MAX_PAGES_NO_FEATURES,
 } from '../src/agent/page-filter.js';
@@ -106,6 +107,23 @@ const pool = [
 }
 check('D5. garbage returns [] (caller falls back)', parsePickResponse('no json here', pool, 8).length === 0);
 check('D6. malformed JSON returns [] without throwing', parsePickResponse('[{"url": broken]', pool, 8).length === 0);
+
+/* ─── E. which discovery sources go through the filter ─────────────────────── */
+check('E1. sitemap and both crawls are filtered',
+  FILTERED_SOURCES.has('sitemap') && FILTERED_SOURCES.has('crawl') && FILTERED_SOURCES.has('browser-crawl'));
+check('E2. SRS and user page sets are never trimmed', !FILTERED_SOURCES.has('srs') && !FILTERED_SOURCES.has('user') && !FILTERED_SOURCES.has('entry'));
+{
+  const browserPages = many.map((p) => ({ ...p, source: 'browser-crawl' as const }));
+  const saved = process.env.ANTHROPIC_API_KEY;
+  delete process.env.ANTHROPIC_API_KEY;
+  try {
+    const r = await filterPages({ pages: browserPages, features: undefined });
+    check('E3. a browser-crawl set over the cap is trimmed like any remote set',
+      r.pages.length === 5 && r.pages.every((p) => p.source === 'browser-crawl'));
+  } finally {
+    if (saved !== undefined) process.env.ANTHROPIC_API_KEY = saved;
+  }
+}
 
 console.log(`\n${pass}/${pass + fail} checks passed.`);
 if (fail > 0) process.exit(1);

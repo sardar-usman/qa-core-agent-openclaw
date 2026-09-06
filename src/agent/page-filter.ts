@@ -20,6 +20,13 @@ import type { DiscoveredPage } from './discovery.js';
 export const MAX_PAGES_WITH_FEATURES = 8;
 export const MAX_PAGES_NO_FEATURES = 5;
 
+/**
+ * The discovery methods whose page sets go through the relevance filter:
+ * every remote-discovered set (sitemap and BOTH crawls). SRS pages are stated
+ * requirements and user pages are explicit intent; neither is ever trimmed.
+ */
+export const FILTERED_SOURCES: ReadonlySet<string> = new Set(['sitemap', 'crawl', 'browser-crawl']);
+
 const HAIKU_MODEL = 'claude-haiku-4-5';
 const PRICE = { in: 1.0, out: 5.0 };
 

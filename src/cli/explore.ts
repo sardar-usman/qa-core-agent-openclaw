@@ -9,7 +9,7 @@ import { parseCommaSeparated } from '../agent/parse-features.js';
 import { buildRequirementsMap, countRules, loadSrsText, type RequirementsMap } from '../agent/requirements.js';
 import { renderRuleCoverage } from '../agent/rule-coverage.js';
 import { readCsv } from '../agent/csv.js';
-import { renderReconciliation } from '../agent/reconcile.js';
+import { diagnoseEmptyRun, renderReconciliation } from '../agent/reconcile.js';
 import type { PlannedScenario } from '../agent/planner.js';
 
 /**
@@ -399,19 +399,23 @@ async function main(): Promise<void> {
   // files" to disk on a bad URL. Bail with a clear message.
   if (!result.scenarios || result.scenarios.length === 0) {
     const totalUsd = result.cost.usd + (result.cost.plannerUsd ?? 0) + (result.cost.criticUsd ?? 0);
-    try { if (fs.existsSync(outDir)) fs.rmSync(outDir, { recursive: true, force: true }); } catch { /* noop */ }
     console.error('');
-    console.error('✗ No framework was written — 0 scenarios produced.');
-    const gateBroken = result.gate?.broken ?? [];
-    if (gateBroken.length > 0) {
-      console.error(`  Gate dropped ${gateBroken.length} scenario(s) before Reality-Check:`);
-      for (const b of gateBroken) {
-        console.error(`    • "${b.scenario}" — ${b.reason} (after ${b.attempts} attempt(s))`);
-      }
-      console.error('  Fix: avoid hard sleeps and fragile CSS selectors on animated elements.');
+    console.error('✗ No framework was written — 0 scenarios survived the pipeline.');
+    // Cause-specific diagnosis: the report knows exactly where the funnel
+    // emptied (planner / explorer / critic / replay). Never guess "the
+    // Planner couldn't reach the URL" when the page was in fact explored.
+    const diag = diagnoseEmptyRun(result);
+    if (diag) {
+      for (const line of diag.lines) console.error(`  ${line}`);
+    }
+    // The spend is never a total loss: run-report.json (full verdicts, plan,
+    // findings, trace) was already written by the runtime. Keep it. Only a
+    // run that never planned anything has nothing worth keeping.
+    if (diag?.cause === 'planner-none') {
+      try { if (fs.existsSync(outDir)) fs.rmSync(outDir, { recursive: true, force: true }); } catch { /* noop */ }
     } else {
-      console.error(`  Most common cause: the Planner couldn't reach ${url} (page unreachable, wrong protocol, behind auth).`);
-      console.error(`  Confirm the URL loads in your own browser, then try again.`);
+      slimFrameworkDir(outDir);
+      console.error(`  Kept ${path.relative(process.cwd(), path.join(outDir, 'run-report.json'))} — full verdicts and trace, the spend is not lost.`);
     }
     console.error(`  Cost so far: $${totalUsd.toFixed(4)}`);
     process.exit(2);
